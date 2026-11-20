@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+*.jsonl
+.DS_Store
+.swarm/
+data/
+release/
