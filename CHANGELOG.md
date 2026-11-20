@@ -4,6 +4,22 @@ All notable changes across the 4-phase SDLC of **Đảo Đèn Lồng (Lantern Is
 
 ---
 
+## Phase 4 (`phase-4` / `v1.0.0`) — Ticket-04 "Bình minh: phát hành v1.0.0" (Contract v1.3)
+
+### Contract & Compatibility
+- **Contract v1.3 (`game.contract.json`):** Bumped `contract_version` to `"1.3"` and added `bench_cmd` (`node scripts/play.mjs --bench`) and `soak_cmd` (`npx tsx src/headless/soak.ts`), with `run_cmd` set to `node scripts/play.mjs`.
+- **No gameplay rule changes:** All v1.0–v1.2 simulation rules, tuning numbers, and headless CLI outputs remain unchanged. Creative extras (Lantern Moth Companion) are disabled in benchmark and soak modes.
+
+### Added
+- **Zero-dependency Node launcher (`scripts/play.mjs`):** Serves `dist/` on a free local port, opens the default browser (`npm start`), exposes same-origin `/api/leaderboard` and `/api/bench/*` endpoints, and supports `--export-leaderboard <file>` without starting the server.
+- **Standard Benchmark (`node scripts/play.mjs --bench`):** 1280×720 Night 1 scene with `200` wandering Shades, `100` motes, `L1`–`L3` lit (`fuel = 100`), orbit camera (`r = 30 m`, `Y = 15 m`, `15 s/rev`), `3 s` warm-up, `--duration` measurement window, Chrome vsync-off flags, browser process-tree RSS sampling, and `bench.json` output (`makeBenchScenario` + `SimOptions.bench`).
+- **Headless Soak Test (`src/headless/soak.ts`):** Single-process 10-Night cycling (`1 -> 2 -> 3`, seed `7 + i`, seeded random inputs) recording `crashes`, `results`, `mem_start_mb`, `mem_end_mb`, and `duration_s` to `soak.json`.
+- **Local Leaderboard:** Top-10 persisted leaderboard at `data/leaderboard.json` (with `localStorage` fallback for static hosting), name entry on Dawn win or any Night loss (`3–12` chars `[A-Za-z0-9_]` + Vietnamese letters), main-menu view, and CLI export (`--export-leaderboard`).
+- **Accessibility & Key Rebinding:** Full key rebinding (4-way movement, jump, dash, interact, pulse, pause) with conflict detection, `"Restore defaults"`, and persistence; visual cues/captions (Shade appearance + edge arrow, pre-wind warning, last `10 s`, lantern `fuel < 30`); Reduced motion (disables camera shake & screen flash); minimum `18 px` UI font at `1280x720` with `x1.25` Large text option.
+- **Release Packaging & Final Docs:** Static web bundle script (`scripts/package-release.sh` → `release/dao-den-long-web-v1.0.0.zip`), `docs/notes/spec-phase4.md`, `docs/notes/retro.md`, updated `README.md`, `CREDITS.md`, `AGENTS.md`, `.claude/skills/headless-proof/SKILL.md`, and `docs/notes/ai-log.md`.
+
+---
+
 ## Phase 3 (`phase-3`) — Ticket-03 "Đèn cạn dầu" (Contract v1.2)
 
 ### Breaking Changes (v1.1 → v1.2)

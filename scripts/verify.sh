@@ -26,17 +26,17 @@ else
   fail "scenario mote-pickup did not yield mote_picked at tick 43"
 fi
 
-# 2. Scenario: win-lantern (v1.1 score: 10 + 100 + 99*2 + 3*50 = 458)
+# 2. Scenario: no-early-win (replaces v1.1 win-lantern early all_lit win)
 if npx tsx src/headless/cli.ts --seed 1 --night 1 \
-  --scenario docs/proof/scenarios/win-lantern.json \
-  --inputs docs/proof/scenarios/win-lantern-inputs.json \
-  --ticks 100 --out "$TMP_DIR/win-lantern.jsonl" >/dev/null 2>&1 \
-  && grep -q '"name":"lantern_lit","data":{"lantern_id":"L5"}' "$TMP_DIR/win-lantern.jsonl" \
-  && grep -q '"name":"game_over","data":{"result":"won","reason":"all_lit"}' "$TMP_DIR/win-lantern.jsonl" \
-  && tail -n 1 "$TMP_DIR/win-lantern.jsonl" | grep -q '"type":"end","ticks":1,"state":"won","score":458'; then
-  pass "scenario win-lantern wins early at tick 1 with expected v1.1 score 458"
+  --scenario docs/proof/scenarios/no-early-win.json \
+  --inputs docs/proof/scenarios/no-early-win-inputs.json \
+  --ticks 30 --out "$TMP_DIR/no-early-win.jsonl" >/dev/null 2>&1 \
+  && grep -q '"name":"lantern_lit","data":{"lantern_id":"L5","relight":false}' "$TMP_DIR/no-early-win.jsonl" \
+  && ! grep -q '"name":"game_over"' "$TMP_DIR/no-early-win.jsonl" \
+  && tail -n 1 "$TMP_DIR/no-early-win.jsonl" | grep -q '"type":"end","ticks":30,"state":"playing","score":105'; then
+  pass "scenario no-early-win lights all 5 lanterns without ending Night early"
 else
-  fail "scenario win-lantern did not win as expected"
+  fail "scenario no-early-win failed"
 fi
 
 # 3. Scenario: pulse-and-hit (v1.1 pulse stun/push then shade recovery & hit)
@@ -137,7 +137,7 @@ if npx tsx src/headless/cli.ts --seed 1 --night 1 \
   --scenario docs/proof/scenarios/safe-zone-push.json \
   --inputs docs/proof/scenarios/safe-zone-push-inputs.json \
   --ticks 40 --snapshot-every 40 --out "$TMP_DIR/safe-zone-push.jsonl" >/dev/null 2>&1 \
-  && grep -q '"name":"lantern_lit","data":{"lantern_id":"L1"}' "$TMP_DIR/safe-zone-push.jsonl" \
+  && grep -q '"name":"lantern_lit","data":{"lantern_id":"L1","relight":false}' "$TMP_DIR/safe-zone-push.jsonl" \
   && ! grep -q '"name":"player_hit"' "$TMP_DIR/safe-zone-push.jsonl"; then
   pass "scenario safe-zone-push ejects shade on lantern_lit with no player damage"
 else
@@ -191,16 +191,196 @@ else
   fail "bad inputs file expected exit 2 with stderr (got exit $BAD_EXIT)"
 fi
 
-# 16. Performance: full Night 3 (21600 ticks) <= 30 s
+# 16. v1.2 Scenario: fuel-decay
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/fuel-decay.json \
+  --ticks 600 --snapshot-every 60 --out "$TMP_DIR/fuel-decay.jsonl" >/dev/null 2>&1 \
+  && grep -q '"tick":60,.*"id":"L1",.*"fuel":99,' "$TMP_DIR/fuel-decay.jsonl" \
+  && grep -q '"tick":600,.*"id":"L1",.*"fuel":90,' "$TMP_DIR/fuel-decay.jsonl"; then
+  pass "scenario fuel-decay decays L1 at 1.0/s (99 at 60t, 90 at 600t)"
+else
+  fail "scenario fuel-decay failed"
+fi
+
+# 17. v1.2 Scenario: refuel-math (ceil, cap 100, full lantern ignored)
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/refuel-math.json \
+  --inputs docs/proof/scenarios/refuel-math-inputs.json \
+  --ticks 10 --out "$TMP_DIR/refuel-math.jsonl" >/dev/null 2>&1 \
+  && grep -q '"tick":1,"name":"refuel","data":{"lantern_id":"L2","amount":2,"fuel":100}' "$TMP_DIR/refuel-math.jsonl" \
+  && [ "$(grep -c '"name":"refuel"' "$TMP_DIR/refuel-math.jsonl")" -eq 1 ]; then
+  pass "scenario refuel-math skips full L1, refuels L2 with 2 motes capped at 100, ignores subsequent full interact"
+else
+  fail "scenario refuel-math failed"
+fi
+
+# 18. v1.2 Scenario: lantern-out-relight
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/lantern-out-relight.json \
+  --inputs docs/proof/scenarios/lantern-out-relight-inputs.json \
+  --ticks 40 --snapshot-every 40 --out "$TMP_DIR/lantern-out-relight.jsonl" >/dev/null 2>&1 \
+  && grep -q '"tick":30,"name":"lantern_out","data":{"lantern_id":"L1"}' "$TMP_DIR/lantern-out-relight.jsonl" \
+  && grep -q '"tick":35,"name":"lantern_lit","data":{"lantern_id":"L1","relight":true}' "$TMP_DIR/lantern-out-relight.jsonl" \
+  && grep -q '"relit_count":1' "$TMP_DIR/lantern-out-relight.jsonl"; then
+  pass "scenario lantern-out-relight turns off L1 at tick 30 and relights with 5 motes at tick 35"
+else
+  fail "scenario lantern-out-relight failed"
+fi
+
+# 19. v1.2 Scenario: safe-zone-threshold (fuel 30 vs 29.9)
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/safe-zone-threshold.json \
+  --ticks 2 --snapshot-every 1 --out "$TMP_DIR/safe-zone-threshold.jsonl" >/dev/null 2>&1 \
+  && grep -q '"tick":1,.*"id":"L1",.*"fuel":30,' "$TMP_DIR/safe-zone-threshold.jsonl" \
+  && grep -q '"tick":1,.*"id":"L2",.*"fuel":29.9,' "$TMP_DIR/safe-zone-threshold.jsonl"; then
+  pass "scenario safe-zone-threshold verified at fuel 30 vs 29.9"
+else
+  fail "scenario safe-zone-threshold failed"
+fi
+
+# 20. v1.2 Scenario: shade-drain-stacking
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/shade-drain-stacking.json \
+  --ticks 130 --snapshot-every 65 --out "$TMP_DIR/shade-drain-stacking.jsonl" >/dev/null 2>&1 \
+  && grep -q '"name":"fuel_drain","data":{"lantern_id":"L1","shade_id":"S1"' "$TMP_DIR/shade-drain-stacking.jsonl" \
+  && grep -q '"name":"fuel_drain","data":{"lantern_id":"L1","shade_id":"S2"' "$TMP_DIR/shade-drain-stacking.jsonl"; then
+  pass "scenario shade-drain-stacking targets weak L1 and emits fuel_drain for stacked shades S1 and S2"
+else
+  fail "scenario shade-drain-stacking failed"
+fi
+
+# 21. v1.2 Scenario: drain-transitions
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/drain-transitions.json \
+  --inputs docs/proof/scenarios/drain-transitions-inputs.json \
+  --ticks 50 --snapshot-every 5 --out "$TMP_DIR/drain-transitions.jsonl" >/dev/null 2>&1 \
+  && grep -q '"tick":1,"name":"pulse","data":{"stunned_ids":\["S2"\]}' "$TMP_DIR/drain-transitions.jsonl" \
+  && grep -q '"id":"S1",.*"state":"chase"' "$TMP_DIR/drain-transitions.jsonl" \
+  && tail -n 1 "$TMP_DIR/drain-transitions.jsonl" | grep -q '"score":15'; then
+  pass "scenario drain-transitions handles drain->stunned (+15) and drain->chase (<6m)"
+else
+  fail "scenario drain-transitions failed"
+fi
+
+# 22. v1.2 Scenario: refuel-pushout
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/refuel-pushout.json \
+  --inputs docs/proof/scenarios/refuel-pushout-inputs.json \
+  --ticks 35 --snapshot-every 35 --out "$TMP_DIR/refuel-pushout.jsonl" >/dev/null 2>&1 \
+  && grep -q '"tick":1,"name":"refuel","data":{"lantern_id":"L1","amount":1,"fuel":34.9}' "$TMP_DIR/refuel-pushout.jsonl" \
+  && ! grep -q '"name":"player_hit"' "$TMP_DIR/refuel-pushout.jsonl"; then
+  pass "scenario refuel-pushout refuels L1 >= 30 and ejects shade with no player damage"
+else
+  fail "scenario refuel-pushout failed"
+fi
+
+# 23. v1.2 Scenarios: dawn-win-n1 (3/5), dawn-win-n2 (4/6), dawn-win-n3 (5/7)
+for N in 1 2 3; do
+  if npx tsx src/headless/cli.ts --seed 1 --night "$N" \
+    --scenario "docs/proof/scenarios/dawn-win-n${N}.json" \
+    --ticks 100 --out "$TMP_DIR/dawn-win-n${N}.jsonl" >/dev/null 2>&1 \
+    && grep -q '"name":"game_over","data":{"result":"won","reason":"dawn_survived"}' "$TMP_DIR/dawn-win-n${N}.jsonl"; then
+    pass "scenario dawn-win-n${N} wins at dawn with reason dawn_survived"
+  else
+    fail "scenario dawn-win-n${N} failed"
+  fi
+done
+
+# 24. v1.2 Scenario: no-flames-dawn
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/no-flames-dawn.json \
+  --ticks 10 --out "$TMP_DIR/no-flames-dawn.jsonl" >/dev/null 2>&1 \
+  && grep -q '"name":"game_over","data":{"result":"lost","reason":"no_flames"}' "$TMP_DIR/no-flames-dawn.jsonl"; then
+  pass "scenario no-flames-dawn prioritizes no_flames over dawn_survived on dawn tick"
+else
+  fail "scenario no-flames-dawn failed"
+fi
+
+# 25. v1.2 Scenario: capacity-growth
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/capacity-growth.json \
+  --inputs docs/proof/scenarios/capacity-growth-inputs.json \
+  --ticks 5 --snapshot-every 1 --out "$TMP_DIR/capacity-growth.jsonl" >/dev/null 2>&1 \
+  && grep -q '"tick":0,.*"capacity":18,' "$TMP_DIR/capacity-growth.jsonl" \
+  && grep -q '"tick":1,.*"capacity":20,' "$TMP_DIR/capacity-growth.jsonl" \
+  && grep -q '"tick":2,.*"carried":20,"capacity":20,' "$TMP_DIR/capacity-growth.jsonl"; then
+  pass "scenario capacity-growth grows from 18 to cap 20 and respects pickup limit"
+else
+  fail "scenario capacity-growth failed"
+fi
+
+# 26. v1.2 Scenario: score-v12
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/score-v12.json \
+  --inputs docs/proof/scenarios/score-v12-inputs.json \
+  --ticks 100 --out "$TMP_DIR/score-v12.jsonl" >/dev/null 2>&1 \
+  && tail -n 1 "$TMP_DIR/score-v12.jsonl" | grep -q '"type":"end","ticks":60,"state":"won","score":666'; then
+  pass "scenario score-v12 matches exact v1.2 score formula (666)"
+else
+  fail "scenario score-v12 failed"
+fi
+
+# 27. v1.2 Scenario: scenario-defaults
+if npx tsx src/headless/cli.ts --seed 1 --night 1 \
+  --scenario docs/proof/scenarios/scenario-defaults.json \
+  --ticks 0 --out "$TMP_DIR/scenario-defaults.jsonl" >/dev/null 2>&1 \
+  && grep -q '"id":"L1",.*"lit":true,"deposited":0,"fuel":100,"ever_lit":true,"relit_count":0' "$TMP_DIR/scenario-defaults.jsonl" \
+  && ! grep -q '"type":"event"' "$TMP_DIR/scenario-defaults.jsonl"; then
+  pass "scenario scenario-defaults defaults lit:true to fuel 100, ever_lit true, 0 events, 0 score"
+else
+  fail "scenario scenario-defaults failed"
+fi
+
+# 28. Performance: full Night 3 (18000 ticks) <= 30 s
 START_MS=$(node -e 'console.log(Date.now())')
-npx tsx src/headless/cli.ts --seed 7 --night 3 --ticks 21600 --out "$TMP_DIR/perf-n3.jsonl" >/dev/null 2>&1
+npx tsx src/headless/cli.ts --seed 7 --night 3 --ticks 18000 --out "$TMP_DIR/perf-n3.jsonl" >/dev/null 2>&1
 PERF_EXIT=$?
 END_MS=$(node -e 'console.log(Date.now())')
 ELAPSED_MS=$((END_MS - START_MS))
 if [ "$PERF_EXIT" -eq 0 ] && [ "$ELAPSED_MS" -le 30000 ]; then
-  pass "performance: Night 3 21600 ticks completed in ${ELAPSED_MS}ms (<= 30000ms)"
+  pass "performance: Night 3 18000 ticks completed in ${ELAPSED_MS}ms (<= 30000ms)"
 else
-  fail "performance: Night 3 21600 ticks failed or exceeded 30000ms (exit=$PERF_EXIT, ${ELAPSED_MS}ms)"
+  fail "performance: Night 3 18000 ticks failed or exceeded 30000ms (exit=$PERF_EXIT, ${ELAPSED_MS}ms)"
+fi
+
+# 29. Short soak test (3 Nights) — 0 crashes and mem_end_mb <= 1.2 * mem_start_mb
+if npx tsx src/headless/soak.ts --seed 7 --nights 3 --out "$TMP_DIR/soak3.json" >/dev/null 2>&1 \
+  && node -e '
+    const fs = require("node:fs");
+    const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (d.nights !== 3 || d.crashes !== 0 || !Array.isArray(d.results) || d.results.length !== 3) process.exit(1);
+    if (typeof d.mem_start_mb !== "number" || typeof d.mem_end_mb !== "number" || d.mem_start_mb <= 0) process.exit(1);
+    if (d.mem_end_mb > 1.2 * d.mem_start_mb) process.exit(1);
+  ' "$TMP_DIR/soak3.json"; then
+  pass "soak (3 nights): 0 crashes and mem_end_mb <= 1.2 * mem_start_mb"
+else
+  fail "soak (3 nights) failed or exceeded memory bound"
+fi
+
+# 30. Launcher --export-leaderboard on empty and populated temp data dir
+LB_DATA_DIR="$TMP_DIR/lb-data"
+if node scripts/play.mjs --data-dir "$LB_DATA_DIR" --export-leaderboard "$TMP_DIR/lb-empty.json" >/dev/null 2>&1 \
+  && node -e '
+    const fs = require("node:fs");
+    const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (!Array.isArray(d.entries) || d.entries.length !== 0) process.exit(1);
+  ' "$TMP_DIR/lb-empty.json" \
+  && node --input-type=module -e '
+    import { addLeaderboardEntry } from "./scripts/leaderboard.mjs";
+    const f = process.argv[1];
+    addLeaderboardEntry(f, { name: "May_1", score: 250, nights_won: 1, seed: 7 });
+    addLeaderboardEntry(f, { name: "May_2", score: 600, nights_won: 2, seed: 8 });
+  ' "$LB_DATA_DIR/leaderboard.json" \
+  && node scripts/play.mjs --data-dir "$LB_DATA_DIR" --export-leaderboard "$TMP_DIR/lb-pop.json" >/dev/null 2>&1 \
+  && node -e '
+    const fs = require("node:fs");
+    const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (!Array.isArray(d.entries) || d.entries.length !== 2) process.exit(1);
+    if (d.entries[0].name !== "May_2" || d.entries[1].name !== "May_1") process.exit(1);
+  ' "$TMP_DIR/lb-pop.json"; then
+  pass "play.mjs --export-leaderboard exports empty and populated leaderboards in order"
+else
+  fail "play.mjs --export-leaderboard check failed"
 fi
 
 if [ "$FAILURES" -ne 0 ]; then

@@ -279,6 +279,101 @@ export class SoundEffects {
     });
   }
 
+  public playRefuel(): void {
+    const ready = this.getReadyContext();
+    if (!ready) return;
+    const { ctx, out } = ready;
+
+    const now = ctx.currentTime;
+    const notes = [440.0, 587.33];
+    notes.forEach((freq, idx) => {
+      const start = now + idx * 0.06;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, start);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.12, start + 0.14);
+
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.linearRampToValueAtTime(0.14, start + 0.018);
+      gain.gain.exponentialRampToValueAtTime(0.0008, start + 0.22);
+
+      osc.connect(gain);
+      gain.connect(out);
+      osc.start(start);
+      osc.stop(start + 0.24);
+    });
+  }
+
+  public playLanternOut(): void {
+    const ready = this.getReadyContext();
+    if (!ready) return;
+    const { ctx, out } = ready;
+
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(340, now);
+    osc.frequency.exponentialRampToValueAtTime(115, now + 0.34);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(620, now);
+    filter.frequency.exponentialRampToValueAtTime(180, now + 0.34);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.18, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0008, now + 0.38);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(out);
+    osc.start(now);
+    osc.stop(now + 0.4);
+
+    if (this.noiseBuffer) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      const nFilter = ctx.createBiquadFilter();
+      nFilter.type = "bandpass";
+      nFilter.frequency.setValueAtTime(900, now);
+      nFilter.frequency.exponentialRampToValueAtTime(300, now + 0.22);
+      nFilter.Q.value = 1.4;
+      const nGain = ctx.createGain();
+      nGain.gain.setValueAtTime(0.001, now);
+      nGain.gain.linearRampToValueAtTime(0.11, now + 0.02);
+      nGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.24);
+      src.connect(nFilter);
+      nFilter.connect(nGain);
+      nGain.connect(out);
+      src.start(now);
+      src.stop(now + 0.26);
+    }
+  }
+
+  public playLowFuelWarning(): void {
+    const ready = this.getReadyContext();
+    if (!ready) return;
+    const { ctx, out } = ready;
+
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(620, now);
+    osc.frequency.setValueAtTime(490, now + 0.08);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0008, now + 0.19);
+
+    osc.connect(gain);
+    gain.connect(out);
+    osc.start(now);
+    osc.stop(now + 0.21);
+  }
+
   public playPulse(stunnedCount: number): void {
     const ready = this.getReadyContext();
     if (!ready) return;

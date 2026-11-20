@@ -134,7 +134,8 @@ function resolvePlayerHorizontal(
   curY: number,
   candX: number,
   candZ: number,
-): [number, number] {
+  out: [number, number],
+): void {
   let resX = candX;
   let resZ = candZ;
 
@@ -170,20 +171,22 @@ function resolvePlayerHorizontal(
     }
   }
 
-  return [resX, resZ];
+  out[0] = resX;
+  out[1] = resZ;
 }
 
-function isShadeBlocked(
+/** Returns ground height if unblocked, or null if blocked. */
+function shadeGroundYIfUnblocked(
   night: NightNumber,
   prevGroundY: number,
   x: number,
   z: number,
-): { blocked: boolean; groundY: number } {
+): number | null {
   const h = getGroundHeight(night, x, z);
-  if (h === null) return { blocked: true, groundY: prevGroundY };
-  if (h > prevGroundY + SIM_CONSTANTS.max_step_up_m) return { blocked: true, groundY: prevGroundY };
-  if (night === 3 && Math.hypot(x, z) < 2.0) return { blocked: true, groundY: prevGroundY };
-  return { blocked: false, groundY: h };
+  if (h === null) return null;
+  if (h > prevGroundY + SIM_CONSTANTS.max_step_up_m) return null;
+  if (night === 3 && Math.hypot(x, z) < 2.0) return null;
+  return h;
 }
 
 export class Sim {
@@ -194,6 +197,7 @@ export class Sim {
   private readonly randomShades: boolean;
   private readonly randomDrifters: boolean;
   private readonly windEnabled: boolean;
+  private readonly bench: boolean;
 
   private tick = 0;
   private simTick = 0;
@@ -224,6 +228,9 @@ export class Sim {
   private currentWindDirDeg = 0;
 
   private lanterns: InternalLantern[];
+  private readonly safeLanternsBuf: InternalLantern[] = [];
+  private readonly drainingShadesBuf: InternalShade[] = [];
+  private readonly horizOutBuf: [number, number] = [0, 0];
   private motes: InternalMote[] = [];
   private shades: InternalShade[] = [];
   private drifters: InternalDrifter[] = [];
@@ -251,10 +258,11 @@ export class Sim {
     this.cfg = nightConfig(this.night);
     const scenario: ScenarioConfig | undefined = options.scenario;
 
-    this.randomMotes = scenario?.random_motes ?? true;
-    this.randomShades = scenario?.random_shades ?? true;
-    this.randomDrifters = scenario?.random_drifters ?? this.cfg.drifters_enabled;
-    this.windEnabled = scenario?.wind_enabled ?? this.cfg.wind_enabled;
+    this.bench = options.bench === true;
+    this.randomMotes = this.bench ? false : (scenario?.random_motes ?? true);
+    this.randomShades = this.bench ? false : (scenario?.random_shades ?? true);
+    this.randomDrifters = this.bench ? false : (scenario?.random_drifters ?? this.cfg.drifters_enabled);
+    this.windEnabled = this.bench ? false : (scenario?.wind_enabled ?? this.cfg.wind_enabled);
 
     const initialTimeLeftS = scenario?.time_left_s ?? this.cfg.duration_s;
     this.remainingTicks = Math.max(0, Math.round(initialTimeLeftS * SIM_CONSTANTS.tick_rate_hz));
@@ -534,7 +542,8 @@ export class Sim {
     const nextTick = this.tick + 1;
 
     if (input.move !== undefined) {
-      this.heldInput.move = [input.move[0], input.move[1]];
+      this.heldInput.move[0] = input.move[0];
+      this.heldInput.move[1] = input.move[1];
     }
     if (input.cam_yaw_deg !== undefined) {
       this.heldInput.cam_yaw_deg = input.cam_yaw_deg;
@@ -585,13 +594,33 @@ export class Sim {
       });
     }
 
+    this.stepCounters(nextTick);
+    this.stepPlayer(nextTick, dt, jumpPressed, dashPressed);
+    this.stepPickups(nextTick);
+    if (interactPressed) {
+      this.stepInteract(nextTick);
+    }
+    this.stepSafeZones(dt);
+    if (pulsePressed) {
+      this.stepPulse(nextTick);
+    }
+    this.stepShades(dt);
+    this.stepDrifters(dt);
+    this.stepContacts(nextTick);
+    this.stepSpawns(nextTick);
+    this.stepWinLose(nextTick);
+  }
+
+  private stepCounters(nextTick: number): void {
     // 2. Decrement Counters
     for (const m of this.motes) m.spawned_this_tick = false;
     for (const s of this.shades) s.spawned_this_tick = false;
     for (const d of this.drifters) d.spawned_this_tick = false;
 
-    this.remainingTicks = Math.max(0, this.remainingTicks - 1);
-    this.timeLeftS = this.remainingTicks / SIM_CONSTANTS.tick_rate_hz;
+    if (!this.bench) {
+      this.remainingTicks = Math.max(0, this.remainingTicks - 1);
+      this.timeLeftS = this.remainingTicks / SIM_CONSTANTS.tick_rate_hz;
+    }
 
     if (this.pulseCdTicks > 0) this.pulseCdTicks -= 1;
     if (this.dashCdTicks > 0) this.dashCdTicks -= 1;
@@ -629,27 +658,29 @@ export class Sim {
     }
 
     if (this.drifters.length > 0) {
-      const keptDrifters: InternalDrifter[] = [];
-      for (const drifter of this.drifters) {
+      let write = 0;
+      for (let i = 0; i < this.drifters.length; i++) {
+        const drifter = this.drifters[i];
         if (drifter.state === "flee") {
           drifter.flee_ticks_left -= 1;
           if (drifter.flee_ticks_left <= 0) continue;
         }
-        keptDrifters.push(drifter);
+        this.drifters[write++] = drifter;
       }
-      this.drifters = keptDrifters;
+      this.drifters.length = write;
     }
 
     if (this.motes.length > 0) {
-      const keptMotes: InternalMote[] = [];
-      for (const mote of this.motes) {
+      let write = 0;
+      for (let i = 0; i < this.motes.length; i++) {
+        const mote = this.motes[i];
         if (mote.kind === "dropped" && mote.ttl_ticks !== null) {
           mote.ttl_ticks -= 1;
           if (mote.ttl_ticks <= 0) continue;
         }
-        keptMotes.push(mote);
+        this.motes[write++] = mote;
       }
-      this.motes = keptMotes;
+      this.motes.length = write;
     }
 
     for (const charm of this.charms) {
@@ -676,71 +707,86 @@ export class Sim {
         this.simTick >= SIM_CONSTANTS.wind_cycle_ticks &&
         phase < SIM_CONSTANTS.wind_gust_ticks
       ) {
-        this.wind = { active: true, dir_deg: this.currentWindDirDeg };
+        this.wind.active = true;
+        this.wind.dir_deg = this.currentWindDirDeg;
       } else {
-        this.wind = {
-          active: false,
-          dir_deg: this.simTick >= warnStart && phase >= warnStart ? this.nextWindDirDeg : 0,
-        };
+        this.wind.active = false;
+        this.wind.dir_deg =
+          this.simTick >= warnStart && phase >= warnStart ? this.nextWindDirDeg : 0;
       }
     } else {
-      this.wind = { active: false, dir_deg: 0 };
+      this.wind.active = false;
+      this.wind.dir_deg = 0;
     }
 
     // Step 2 (v1.2): Subtract fuel (decay 1/s + drain 5/s per draining shade)
-    for (const lantern of this.lanterns) {
-      if (!lantern.lit) continue;
-      const wasLowFuel = lantern.fuel_units < SIM_CONSTANTS.low_fuel_threshold_units;
-      lantern.fuel_units -= SIM_CONSTANTS.fuel_decay_units_per_tick;
+    if (!this.bench) {
+      this.stepFuel(nextTick);
+    }
+  }
 
-      const drainingShades: InternalShade[] = [];
-      if (wasLowFuel) {
-        for (const shade of this.shades) {
-          if (
-            shade.state === "drain" &&
-            shade.target_lantern_id === lantern.id &&
-            distXZ(shade.pos, lantern.pos) <= SIM_CONSTANTS.shade_drain_radius_m
-          ) {
-            lantern.fuel_units -= SIM_CONSTANTS.drain_units_per_tick;
-            shade.drain_ticks += 1;
-            drainingShades.push(shade);
+  private stepFuel(nextTick: number): void {
+      for (const lantern of this.lanterns) {
+        if (!lantern.lit) continue;
+        const wasLowFuel = lantern.fuel_units < SIM_CONSTANTS.low_fuel_threshold_units;
+        lantern.fuel_units -= SIM_CONSTANTS.fuel_decay_units_per_tick;
+
+        const drainingShades = this.drainingShadesBuf;
+        drainingShades.length = 0;
+        if (wasLowFuel) {
+          for (const shade of this.shades) {
+            if (
+              shade.state === "drain" &&
+              shade.target_lantern_id === lantern.id &&
+              distXZ(shade.pos, lantern.pos) <= SIM_CONSTANTS.shade_drain_radius_m
+            ) {
+              lantern.fuel_units -= SIM_CONSTANTS.drain_units_per_tick;
+              shade.drain_ticks += 1;
+              drainingShades.push(shade);
+            }
+          }
+        }
+
+        if (lantern.fuel_units < 0) {
+          lantern.fuel_units = 0;
+        }
+
+        const displayFuel = fuelUnitsToDisplay(lantern.fuel_units);
+        for (const shade of drainingShades) {
+          if (shade.drain_ticks % SIM_CONSTANTS.fuel_drain_event_interval_ticks === 0) {
+            this.eventQueue.push({
+              type: "event",
+              tick: nextTick,
+              name: "fuel_drain",
+              data: { lantern_id: lantern.id, shade_id: shade.id, fuel: displayFuel },
+            });
           }
         }
       }
 
-      if (lantern.fuel_units < 0) {
-        lantern.fuel_units = 0;
-      }
-
-      const displayFuel = fuelUnitsToDisplay(lantern.fuel_units);
-      for (const shade of drainingShades) {
-        if (shade.drain_ticks % SIM_CONSTANTS.fuel_drain_event_interval_ticks === 0) {
+      // Right after Step 2: lanterns with fuel <= 0 turn off immediately
+      for (const lantern of this.lanterns) {
+        if (lantern.lit && lantern.fuel_units <= 0) {
+          lantern.lit = false;
+          lantern.fuel_units = 0;
+          lantern.deposited = 0;
+          lantern.ever_lit = true;
           this.eventQueue.push({
             type: "event",
             tick: nextTick,
-            name: "fuel_drain",
-            data: { lantern_id: lantern.id, shade_id: shade.id, fuel: displayFuel },
+            name: "lantern_out",
+            data: { lantern_id: lantern.id },
           });
         }
       }
-    }
+  }
 
-    // Right after Step 2: lanterns with fuel <= 0 turn off immediately
-    for (const lantern of this.lanterns) {
-      if (lantern.lit && lantern.fuel_units <= 0) {
-        lantern.lit = false;
-        lantern.fuel_units = 0;
-        lantern.deposited = 0;
-        lantern.ever_lit = true;
-        this.eventQueue.push({
-          type: "event",
-          tick: nextTick,
-          name: "lantern_out",
-          data: { lantern_id: lantern.id },
-        });
-      }
-    }
-
+  private stepPlayer(
+    nextTick: number,
+    dt: number,
+    jumpPressed: boolean,
+    dashPressed: boolean,
+  ): void {
     // 3. Move May (Jump, Dash, Jump Pads, Wind) & Fall Check
     if (this.fallRespawnTicks > 0) {
       this.playerVel = [0, 0, 0];
@@ -761,7 +807,8 @@ export class Sim {
       const wz = -mx * sinT + mz * cosT;
       const wLen = Math.hypot(wx, wz);
       if (wLen > 1e-6) {
-        this.facing = [wx / wLen, wz / wLen];
+        this.facing[0] = wx / wLen;
+        this.facing[1] = wz / wLen;
       }
 
       // 3.2 Dash activation
@@ -770,8 +817,13 @@ export class Sim {
         this.dashTicksLeft === 0 &&
         (this.dashCdTicks === 0 || this.charmTicks > 0)
       ) {
-        this.dashDir =
-          wLen > 1e-6 ? [wx / wLen, wz / wLen] : [this.facing[0], this.facing[1]];
+        if (wLen > 1e-6) {
+          this.dashDir[0] = wx / wLen;
+          this.dashDir[1] = wz / wLen;
+        } else {
+          this.dashDir[0] = this.facing[0];
+          this.dashDir[1] = this.facing[1];
+        }
         this.dashTicksLeft = Math.round(TUNING.dash_duration_s * SIM_CONSTANTS.tick_rate_hz);
         this.dashCdTicks =
           this.charmTicks > 0
@@ -840,16 +892,17 @@ export class Sim {
       // 3.7 Horizontal integration & collision
       const candX = this.playerPos[0] + this.playerVel[0] * dt + windDx;
       const candZ = this.playerPos[2] + this.playerVel[2] * dt + windDz;
-      const [nx, nz] = resolvePlayerHorizontal(
+      resolvePlayerHorizontal(
         this.night,
         this.playerPos[0],
         this.playerPos[2],
         this.playerPos[1],
         candX,
         candZ,
+        this.horizOutBuf,
       );
-      this.playerPos[0] = nx;
-      this.playerPos[2] = nz;
+      this.playerPos[0] = this.horizOutBuf[0];
+      this.playerPos[2] = this.horizOutBuf[1];
 
       // 3.8 Vertical integration & grounded resolution
       const prevY = this.playerPos[1];
@@ -893,7 +946,7 @@ export class Sim {
       }
 
       // 3.10 Fall check
-      if (this.playerPos[1] < SIM_CONSTANTS.fall_y_threshold) {
+      if (!this.bench && this.playerPos[1] < SIM_CONSTANTS.fall_y_threshold) {
         this.flames = Math.max(0, this.flames - 1);
         const lost = this.carried;
         this.carried = 0;
@@ -912,13 +965,16 @@ export class Sim {
         }
       }
     }
+  }
 
+  private stepPickups(nextTick: number): void {
     // 4. Pick Up Motes and Charms
-    if (this.fallRespawnTicks === 0) {
+    if (!this.bench && this.fallRespawnTicks === 0) {
       const carryCapacity = this.getCarryCapacity();
       if (this.carried < carryCapacity && this.motes.length > 0) {
-        const remaining: InternalMote[] = [];
-        for (const mote of this.motes) {
+        let write = 0;
+        for (let i = 0; i < this.motes.length; i++) {
+          const mote = this.motes[i];
           if (
             !mote.spawned_this_tick &&
             this.carried < carryCapacity &&
@@ -933,10 +989,10 @@ export class Sim {
               data: { carried: this.carried },
             });
           } else {
-            remaining.push(mote);
+            this.motes[write++] = mote;
           }
         }
-        this.motes = remaining;
+        this.motes.length = write;
       }
 
       for (const charm of this.charms) {
@@ -958,9 +1014,11 @@ export class Sim {
         }
       }
     }
+  }
 
+  private stepInteract(nextTick: number): void {
     // 5. Interact with Lanterns
-    if (this.fallRespawnTicks === 0 && interactPressed && this.carried > 0) {
+    if (this.fallRespawnTicks === 0 && this.carried > 0) {
       let bestLantern: InternalLantern | null = null;
       let bestDist = Infinity;
       for (const lantern of this.lanterns) {
@@ -1069,9 +1127,16 @@ export class Sim {
         }
       }
     }
+  }
 
+  private stepSafeZones(dt: number): void {
     // 6. Update Safe Zones (only lit lanterns with fuel >= 30)
-    const safeLanterns = this.lanterns.filter(hasSafeZone);
+    const safeLanterns = this.safeLanternsBuf;
+    safeLanterns.length = 0;
+    for (let i = 0; i < this.lanterns.length; i++) {
+      const l = this.lanterns[i];
+      if (hasSafeZone(l)) safeLanterns.push(l);
+    }
     for (const shade of this.shades) {
       if (shade.safe_push_ticks_left <= 0) continue;
 
@@ -1110,22 +1175,23 @@ export class Sim {
         shade.pos[1] - SIM_CONSTANTS.shade_center_y_offset_m;
       const candX = shade.pos[0] + dirX * pushDist;
       const candZ = shade.pos[2] + dirZ * pushDist;
-      const check = isShadeBlocked(this.night, prevGroundY, candX, candZ);
-      if (!check.blocked) {
+      const pushGroundY = shadeGroundYIfUnblocked(this.night, prevGroundY, candX, candZ);
+      if (pushGroundY !== null) {
         shade.pos[0] = candX;
         shade.pos[2] = candZ;
-        shade.pos[1] = check.groundY + SIM_CONSTANTS.shade_center_y_offset_m;
+        shade.pos[1] = pushGroundY + SIM_CONSTANTS.shade_center_y_offset_m;
       }
       if (distXZ(shade.pos, l.pos) >= TUNING.safe_radius) {
         shade.safe_push_ticks_left = 0;
         shade.safe_push_lantern_id = null;
       }
     }
+  }
 
+  private stepPulse(nextTick: number): void {
     // 7. Pulse (Toa Sang)
     if (
       this.fallRespawnTicks === 0 &&
-      pulsePressed &&
       this.carried >= TUNING.pulse_cost &&
       this.pulseCdTicks === 0
     ) {
@@ -1192,8 +1258,11 @@ export class Sim {
         }
       }
     }
+  }
 
+  private stepShades(dt: number): void {
     // 8. Move Shades and Drifters
+    const safeLanterns = this.safeLanternsBuf;
     const shadeSpeed = this.cfg.shade_speed;
     for (const shade of this.shades) {
       if (shade.state === "spawning") continue;
@@ -1207,13 +1276,13 @@ export class Sim {
           const pushStep = TUNING.pulse_push_m / SIM_CONSTANTS.pulse_push_ticks;
           const candX = shade.pos[0] + shade.pulse_push_dir[0] * pushStep;
           const candZ = shade.pos[2] + shade.pulse_push_dir[1] * pushStep;
-          const check = isShadeBlocked(this.night, prevGroundY, candX, candZ);
-          if (check.blocked) {
+          const pushGroundY = shadeGroundYIfUnblocked(this.night, prevGroundY, candX, candZ);
+          if (pushGroundY === null) {
             shade.pulse_push_ticks_left = 0;
           } else {
             shade.pos[0] = candX;
             shade.pos[2] = candZ;
-            shade.pos[1] = check.groundY + SIM_CONSTANTS.shade_center_y_offset_m;
+            shade.pos[1] = pushGroundY + SIM_CONSTANTS.shade_center_y_offset_m;
             shade.pulse_push_ticks_left -= 1;
           }
         }
@@ -1262,6 +1331,7 @@ export class Sim {
       // wander <-> chase transitions
       if (shade.state === "wander") {
         if (
+          !this.bench &&
           this.fallRespawnTicks === 0 &&
           distXZ(shade.pos, this.playerPos) <= SIM_CONSTANTS.shade_detect_radius_m
         ) {
@@ -1314,7 +1384,8 @@ export class Sim {
           shade.target_lantern_id = null;
           if (shade.wander_ticks_left <= 0) {
             const angle = this.rng() * 2 * Math.PI;
-            shade.wander_dir = [Math.cos(angle), Math.sin(angle)];
+            shade.wander_dir[0] = Math.cos(angle);
+            shade.wander_dir[1] = Math.sin(angle);
             shade.wander_ticks_left = 60 + Math.floor(this.rng() * 120);
           }
           shade.wander_ticks_left -= 1;
@@ -1341,7 +1412,9 @@ export class Sim {
         this.applyShadeMove(shade, prevGroundY, candX, candZ, safeLanterns);
       }
     }
+  }
 
+  private stepDrifters(dt: number): void {
     // Move Drifters
     for (const drifter of this.drifters) {
       if (drifter.state === "idle") {
@@ -1366,7 +1439,8 @@ export class Sim {
       if (drifter.state === "idle") {
         if (drifter.wander_ticks_left <= 0) {
           const angle = this.rng() * 2 * Math.PI;
-          drifter.wander_dir = [Math.cos(angle), Math.sin(angle)];
+          drifter.wander_dir[0] = Math.cos(angle);
+          drifter.wander_dir[1] = Math.sin(angle);
           drifter.wander_ticks_left = 60 + Math.floor(this.rng() * 120);
         }
         drifter.wander_ticks_left -= 1;
@@ -1405,9 +1479,11 @@ export class Sim {
         drifter.pos[1] = (h ?? 0) + SIM_CONSTANTS.drifter_center_y_offset_m;
       }
     }
+  }
 
+  private stepContacts(nextTick: number): void {
     // 9. Contacts (Drifter first, then Shades ascending id)
-    if (this.fallRespawnTicks === 0) {
+    if (!this.bench && this.fallRespawnTicks === 0) {
       for (const drifter of this.drifters) {
         if (
           drifter.state === "chase" &&
@@ -1485,8 +1561,11 @@ export class Sim {
         }
       }
     }
+  }
 
+  private stepSpawns(nextTick: number): void {
     // 10. Spawn Motes, Shades, Drifters by Schedule
+    const safeLanterns = this.safeLanternsBuf;
     if (
       this.randomMotes &&
       this.simTick > 0 &&
@@ -1594,42 +1673,46 @@ export class Sim {
         this.drifters.sort((a, b) => compareIds(a.id, b.id));
       }
     }
+  }
 
+  private stepWinLose(nextTick: number): void {
     // 11. Win / Lose Check (no_flames always first; at dawn lit >= ceil(0.6*total) wins with dawn_survived)
-    if (this.flames <= 0) {
-      this.state = "lost";
-      this.eventQueue.push({
-        type: "event",
-        tick: nextTick,
-        name: "game_over",
-        data: { result: "lost", reason: "no_flames" },
-      });
-    } else if (this.remainingTicks <= 0) {
-      this.timeLeftS = 0;
-      const litLanterns = this.lanterns.filter((l) => l.lit);
-      const threshold = Math.ceil(TUNING.win_ratio * this.lanterns.length);
-      if (litLanterns.length >= threshold) {
-        for (const l of litLanterns) {
-          this.score +=
-            TUNING.score.per_lit_lantern_dawn +
-            Math.floor(l.fuel_units / SIM_CONSTANTS.fuel_units_per_point);
-        }
-        this.score += this.flames * TUNING.score.per_flame_left;
-        this.state = "won";
-        this.eventQueue.push({
-          type: "event",
-          tick: nextTick,
-          name: "game_over",
-          data: { result: "won", reason: "dawn_survived" },
-        });
-      } else {
+    if (!this.bench) {
+      if (this.flames <= 0) {
         this.state = "lost";
         this.eventQueue.push({
           type: "event",
           tick: nextTick,
           name: "game_over",
-          data: { result: "lost", reason: "dawn" },
+          data: { result: "lost", reason: "no_flames" },
         });
+      } else if (this.remainingTicks <= 0) {
+        this.timeLeftS = 0;
+        const litLanterns = this.lanterns.filter((l) => l.lit);
+        const threshold = Math.ceil(TUNING.win_ratio * this.lanterns.length);
+        if (litLanterns.length >= threshold) {
+          for (const l of litLanterns) {
+            this.score +=
+              TUNING.score.per_lit_lantern_dawn +
+              Math.floor(l.fuel_units / SIM_CONSTANTS.fuel_units_per_point);
+          }
+          this.score += this.flames * TUNING.score.per_flame_left;
+          this.state = "won";
+          this.eventQueue.push({
+            type: "event",
+            tick: nextTick,
+            name: "game_over",
+            data: { result: "won", reason: "dawn_survived" },
+          });
+        } else {
+          this.state = "lost";
+          this.eventQueue.push({
+            type: "event",
+            tick: nextTick,
+            name: "game_over",
+            data: { result: "lost", reason: "dawn" },
+          });
+        }
       }
     }
   }
@@ -1670,13 +1753,13 @@ export class Sim {
     let nz = candZ;
     let groundY = prevGroundY;
 
-    const check = isShadeBlocked(this.night, prevGroundY, nx, nz);
-    if (check.blocked) {
+    const nextGroundY = shadeGroundYIfUnblocked(this.night, prevGroundY, nx, nz);
+    if (nextGroundY === null) {
       blocked = true;
       nx = shade.pos[0];
       nz = shade.pos[2];
     } else {
-      groundY = check.groundY;
+      groundY = nextGroundY;
     }
 
     // Safe-zone exclusion (2 passes over safe lanterns in ascending id order)
@@ -1692,11 +1775,11 @@ export class Sim {
             const [dirX, dirZ] = normalizeXZ(ldx, ldz);
             const px = l.pos[0] + dirX * pushR;
             const pz = l.pos[2] + dirZ * pushR;
-            const pCheck = isShadeBlocked(this.night, groundY, px, pz);
-            if (!pCheck.blocked) {
+            const pushGroundY = shadeGroundYIfUnblocked(this.night, groundY, px, pz);
+            if (pushGroundY !== null) {
               nx = px;
               nz = pz;
-              groundY = pCheck.groundY;
+              groundY = pushGroundY;
             }
           }
         }

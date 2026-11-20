@@ -1,4 +1,5 @@
 export { Sim } from "./sim.js";
+export { makeBenchScenario } from "./bench.js";
 export { mulberry32 } from "./rng.js";
 export { TUNING, SIM_CONSTANTS, PALETTE } from "./tuning.js";
 export { nightConfig, getGroundHeight } from "./maps.js";

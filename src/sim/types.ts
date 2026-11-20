@@ -82,6 +82,7 @@ export interface SimOptions {
   seed: number;
   night?: NightNumber;
   scenario?: ScenarioConfig;
+  bench?: boolean;
 }
 
 export interface PlayerState {

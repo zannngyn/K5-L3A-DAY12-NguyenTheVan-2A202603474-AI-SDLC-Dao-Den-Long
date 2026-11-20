@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const CLI_ARGS = ["tsx", "src/headless/cli.ts"];
 
-describe("Headless CLI v1.1", () => {
+describe("Headless CLI v1.2", () => {
   let workDir: string;
 
   beforeEach(() => {
@@ -17,7 +17,7 @@ describe("Headless CLI v1.1", () => {
     rmSync(workDir, { recursive: true, force: true });
   });
 
-  it("writes v1.1 snapshots (night, wind, player fields, motes/drifters/charms) and night_start event", () => {
+  it("writes v1.2 snapshots (capacity, lantern fuel/ever_lit/relit_count, night, wind, motes/drifters/charms) and night_start event", () => {
     const outPath = join(workDir, "out.jsonl");
     const res = spawnSync(
       "npx",
@@ -35,15 +35,25 @@ describe("Headless CLI v1.1", () => {
     expect(snapshots.map((s) => s.tick)).toEqual([0, 10, 20]);
     const s0 = snapshots[0];
     expect(s0.night).toBe(2);
+    expect(s0.time_left_s).toBe(270);
     expect(s0.wind).toEqual({ active: false, dir_deg: 0 });
     expect(s0.player).toMatchObject({
       grounded: true,
       flames: 3,
       carried: 0,
+      capacity: 10,
       invuln: false,
       dash_cd_s: 0,
       pulse_cd_s: 0,
       charm_s: 0,
+    });
+    expect(s0.lanterns[0]).toMatchObject({
+      id: "L1",
+      lit: false,
+      deposited: 0,
+      fuel: 0,
+      ever_lit: false,
+      relit_count: 0,
     });
     expect(Array.isArray(s0.player.vel)).toBe(true);
     expect(s0.motes).toHaveLength(20);
@@ -61,7 +71,7 @@ describe("Headless CLI v1.1", () => {
     });
   });
 
-  it("stops early on win, writes final off-interval snapshot, and ends with v1.1 score", () => {
+  it("wins at dawn with dawn_survived, writes final snapshot, and ends with v1.2 dawn score", () => {
     const outPath = join(workDir, "win.jsonl");
     const res = spawnSync(
       "npx",
@@ -72,13 +82,11 @@ describe("Headless CLI v1.1", () => {
         "--night",
         "1",
         "--scenario",
-        "docs/proof/scenarios/win-lantern.json",
-        "--inputs",
-        "docs/proof/scenarios/win-lantern-inputs.json",
+        "docs/proof/scenarios/dawn-win-n1.json",
         "--ticks",
         "100",
         "--snapshot-every",
-        "10",
+        "25",
         "--out",
         outPath,
       ],
@@ -92,13 +100,19 @@ describe("Headless CLI v1.1", () => {
       .map((l) => JSON.parse(l));
 
     const snapshots = lines.filter((l) => l.type === "snapshot");
-    expect(snapshots.map((s) => s.tick)).toEqual([0, 1]);
-    expect(snapshots[1].state).toBe("won");
+    expect(snapshots.map((s) => s.tick)).toEqual([0, 25, 50, 60]);
+    expect(snapshots[snapshots.length - 1].state).toBe("won");
+    expect(
+      lines.some(
+        (l) => l.type === "event" && l.name === "game_over" && l.data.result === "won" && l.data.reason === "dawn_survived",
+      ),
+    ).toBe(true);
+    // 3 lit lanterns at fuel 49.0 -> 3*(50+49) = 297 + 3*50 = 447
     expect(lines[lines.length - 1]).toEqual({
       type: "end",
-      ticks: 1,
+      ticks: 60,
       state: "won",
-      score: 458,
+      score: 447,
     });
   });
 

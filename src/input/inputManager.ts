@@ -1,4 +1,5 @@
 import type { StepInput } from "../sim";
+import { DEFAULT_KEY_BINDINGS, type KeyBindings } from "../ui/settings";
 
 export interface InputCallbacks {
   onFirstInteraction?: () => void;
@@ -15,13 +16,16 @@ const MAX_CAM_PITCH_DEG = 60;
 
 /**
  * Keyboard & mouse input manager producing contract-compliant StepInput frames.
- * Preserves pointer-lock mouse look and J/K camera rotation, adds Shift dash,
- * Esc/P pause, and configurable mouse sensitivity.
+ * Supports rebindable keys for all gameplay actions while keeping Arrow keys
+ * as a fixed alternate for movement, pointer-lock mouse look, and J/K camera rotation.
  */
 export class InputManager {
   private readonly target: HTMLElement;
   private readonly callbacks: InputCallbacks;
   private readonly keys = new Set<string>();
+
+  private bindings: KeyBindings = { ...DEFAULT_KEY_BINDINGS };
+  private rebindingActive = false;
 
   private camYawDeg = 0;
   private camPitchDeg = DEFAULT_CAM_PITCH_DEG;
@@ -42,6 +46,14 @@ export class InputManager {
     this.target = target;
     this.callbacks = callbacks;
     this.bindEvents();
+  }
+
+  public setKeyBindings(bindings: KeyBindings): void {
+    this.bindings = { ...bindings };
+  }
+
+  public setRebindingActive(active: boolean): void {
+    this.rebindingActive = active;
   }
 
   public setSensitivity(multiplier: number): void {
@@ -98,8 +110,12 @@ export class InputManager {
   public updateCamera(dtSec: number): void {
     if (!this.gameplayActive) return;
     let yawDelta = 0;
-    if (this.keys.has("KeyJ")) yawDelta += CAMERA_KEY_YAW_SPEED_DEG * dtSec;
-    if (this.keys.has("KeyK")) yawDelta -= CAMERA_KEY_YAW_SPEED_DEG * dtSec;
+    if (this.keys.has("KeyJ") && !this.isBoundToAction("KeyJ")) {
+      yawDelta += CAMERA_KEY_YAW_SPEED_DEG * dtSec;
+    }
+    if (this.keys.has("KeyK") && !this.isBoundToAction("KeyK")) {
+      yawDelta -= CAMERA_KEY_YAW_SPEED_DEG * dtSec;
+    }
     if (yawDelta !== 0) {
       this.camYawDeg = this.wrapDeg(this.camYawDeg + yawDelta);
     }
@@ -110,20 +126,20 @@ export class InputManager {
     let mz = 0;
 
     if (this.gameplayActive) {
-      if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) mz += 1;
-      if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) mz -= 1;
-      if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) mx += 1;
-      if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) mx -= 1;
+      // Arrow keys always remain a fixed alternate for movement
+      if (this.keys.has(this.bindings.moveUp) || this.keys.has("ArrowUp")) mz += 1;
+      if (this.keys.has(this.bindings.moveDown) || this.keys.has("ArrowDown")) mz -= 1;
+      if (this.keys.has(this.bindings.moveLeft) || this.keys.has("ArrowLeft")) mx += 1;
+      if (this.keys.has(this.bindings.moveRight) || this.keys.has("ArrowRight")) mx -= 1;
     }
 
-    const jump = this.gameplayActive && (this.keys.has("Space") || this.pendingJump);
-    const interact = this.gameplayActive && (this.keys.has("KeyE") || this.pendingInteract);
+    const jump = this.gameplayActive && (this.isKeyHeldFor(this.bindings.jump) || this.pendingJump);
+    const interact =
+      this.gameplayActive && (this.isKeyHeldFor(this.bindings.interact) || this.pendingInteract);
     const pulse =
       this.gameplayActive &&
-      (this.keys.has("KeyQ") || this.rightMouseDown || this.pendingPulse);
-    const dash =
-      this.gameplayActive &&
-      (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") || this.pendingDash);
+      (this.isKeyHeldFor(this.bindings.pulse) || this.rightMouseDown || this.pendingPulse);
+    const dash = this.gameplayActive && (this.isKeyHeldFor(this.bindings.dash) || this.pendingDash);
     const pause = this.pendingPause;
 
     this.pendingJump = false;
@@ -153,6 +169,43 @@ export class InputManager {
     this.target.removeEventListener("contextmenu", this.handleContextMenu);
     document.removeEventListener("pointerlockchange", this.handlePointerLockChange);
     document.removeEventListener("pointerlockerror", this.handlePointerLockError);
+  }
+
+  private isKeyHeldFor(boundCode: string): boolean {
+    if (this.keys.has(boundCode)) return true;
+    if (boundCode === "ShiftLeft" && !this.isBoundToAction("ShiftRight") && this.keys.has("ShiftRight")) {
+      return true;
+    }
+    return false;
+  }
+
+  private matchesCode(eCode: string, boundCode: string): boolean {
+    if (eCode === boundCode) return true;
+    if (boundCode === "ShiftLeft" && !this.isBoundToAction("ShiftRight") && eCode === "ShiftRight") {
+      return true;
+    }
+    return false;
+  }
+
+  private isBoundToAction(code: string): boolean {
+    return (
+      this.bindings.moveUp === code ||
+      this.bindings.moveDown === code ||
+      this.bindings.moveLeft === code ||
+      this.bindings.moveRight === code ||
+      this.bindings.jump === code ||
+      this.bindings.dash === code ||
+      this.bindings.interact === code ||
+      this.bindings.pulse === code ||
+      this.bindings.pause === code
+    );
+  }
+
+  private isTypingInField(): boolean {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || (el as HTMLElement).isContentEditable;
   }
 
   private notifyFirstInteraction(): void {
@@ -205,29 +258,40 @@ export class InputManager {
   private readonly handleKeyDown = (e: KeyboardEvent): void => {
     this.notifyFirstInteraction();
 
+    if (this.rebindingActive) return;
+    if (this.isTypingInField()) return;
+
     if (
       this.gameplayActive &&
       (e.code === "Space" ||
         e.code === "ArrowUp" ||
         e.code === "ArrowDown" ||
         e.code === "ArrowLeft" ||
-        e.code === "ArrowRight")
+        e.code === "ArrowRight" ||
+        e.code === this.bindings.jump ||
+        e.code === this.bindings.moveUp ||
+        e.code === this.bindings.moveDown ||
+        e.code === this.bindings.moveLeft ||
+        e.code === this.bindings.moveRight)
     ) {
       e.preventDefault();
     }
 
     if (!e.repeat) {
-      if (e.code === "Escape" || e.code === "KeyP") {
+      const isPauseKey =
+        e.code === this.bindings.pause ||
+        (this.bindings.pause === "Escape" && e.code === "KeyP" && !this.isBoundToAction("KeyP"));
+      if (isPauseKey) {
         this.callbacks.onPauseKey?.();
         return;
       }
       if (this.gameplayActive) {
-        if (e.code === "Space") this.pendingJump = true;
-        if (e.code === "KeyE") this.pendingInteract = true;
-        if (e.code === "KeyQ") this.pendingPulse = true;
-        if (e.code === "ShiftLeft" || e.code === "ShiftRight") this.pendingDash = true;
+        if (this.matchesCode(e.code, this.bindings.jump)) this.pendingJump = true;
+        if (this.matchesCode(e.code, this.bindings.interact)) this.pendingInteract = true;
+        if (this.matchesCode(e.code, this.bindings.pulse)) this.pendingPulse = true;
+        if (this.matchesCode(e.code, this.bindings.dash)) this.pendingDash = true;
       }
-      if (e.code === "KeyR") {
+      if (e.code === "KeyR" && !this.gameplayActive) {
         this.callbacks.onRestartKey?.();
       }
     }

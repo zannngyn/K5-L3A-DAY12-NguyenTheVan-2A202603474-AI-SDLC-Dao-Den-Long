@@ -14,7 +14,8 @@ function norm2(dx: number, dz: number): [number, number] {
 const NIGHT1_CONFIG: NightConfig = {
   night: 1,
   name: "Đảo Bến",
-  introLine: "Đêm đầu tiên trên Đảo Bến — hãy gom ánh đom đóm và thắp sáng năm ngọn đèn lớn trước bình minh.",
+  introLine:
+    "Đêm đầu tiên trên Đảo Bến — hãy gom ánh đom đóm và giữ sáng ít nhất 3/5 ngọn đèn lớn cho đến bình minh.",
   duration_s: TUNING.night1_duration_s,
   playerStart: [0, 0, 0],
   shade_speed: 4.0,
@@ -44,7 +45,8 @@ const NIGHT1_CONFIG: NightConfig = {
 const NIGHT2_CONFIG: NightConfig = {
   night: 2,
   name: "Đảo Cầu",
-  introLine: "Đảo Cầu nối hai bờ bằng cầu tre mảnh — coi chừng Gió Lạc và tận dụng bệ nhảy cùng Bùa Gió.",
+  introLine:
+    "Đảo Cầu nối hai bờ bằng cầu tre mảnh — coi chừng Gió Lạc, tận dụng bệ nhảy cùng Bùa Gió và giữ sáng ít nhất 4/6 ngọn đèn đến bình minh.",
   duration_s: TUNING.night2_duration_s,
   playerStart: [0, 0, 0],
   shade_speed: 4.0,
@@ -101,7 +103,8 @@ const NIGHT2_CONFIG: NightConfig = {
 const NIGHT3_CONFIG: NightConfig = {
   night: 3,
   name: "Đảo Chuông",
-  introLine: "Đêm cuối trên Đảo Chuông — giữ vững bước chân trước gió giật và thắp sáng cả ba tầng đảo.",
+  introLine:
+    "Đêm cuối trên Đảo Chuông — giữ vững bước chân trước gió giật và giữ sáng ít nhất 5/7 ngọn đèn trên ba tầng đảo đến bình minh.",
   duration_s: TUNING.night3_duration_s,
   playerStart: [0, 0, -12],
   shade_speed: 4.5,

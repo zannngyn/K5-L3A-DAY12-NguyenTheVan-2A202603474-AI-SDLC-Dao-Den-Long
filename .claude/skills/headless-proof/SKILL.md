@@ -1,28 +1,25 @@
 ---
 name: headless-proof
-description: Use when verifying Đảo Đèn Lồng simulation behavior, determinism, error handling, or generating Phase 1–4 headless verification evidence under docs/proof/.
+description: Use when verifying Đảo Đèn Lồng simulation behavior, determinism, error handling, soak stability, benchmark output, or generating Phase 1–4 evidence under docs/proof/.
 ---
 
-# Headless Proof Skill
+# Headless & Phase 4 Verification Skill
 
-Run reproducible headless checks against `src/headless/cli.ts` and record evidence under `docs/proof/`.
+Run reproducible headless, soak, launcher, and benchmark checks (Contract v1.3) and record evidence under `docs/proof/`.
 
 ## 1. Run a Scenario Headless
 
 ```bash
 npx tsx src/headless/cli.ts \
-  --seed 1 \
-  --night 1 \
+  --seed 1 --night 1 \
   --scenario docs/proof/scenarios/<name>.json \
   --inputs docs/proof/scenarios/<name>-inputs.json \
-  --ticks 300 \
-  --out docs/proof/<name>.jsonl
+  --ticks 300 --out docs/proof/<name>.jsonl
 ```
 
-- Use `--night 1`, `2`, or `3` (Contract v1.2).
-- Inspect the JSONL output to confirm expected `event` lines (including v1.2 `refuel`, `lantern_out`, `fuel_drain`, `lantern_lit { relight }`, `game_over { reason: "dawn_survived" | "dawn" | "no_flames" }`) and the final `{"type":"end",...}` line.
+- Supports `--night 1|2|3`. Verify expected `event` lines (`refuel`, `lantern_out`, `fuel_drain`, `lantern_lit { relight }`, `game_over`) and final `{"type":"end",...}`.
 
-## 2. Verify Determinism (Same Seed Twice + Diff)
+## 2. Verify Determinism & Exit Code 2
 
 ```bash
 npx tsx src/headless/cli.ts --seed 42 --night 1 --ticks 600 --out /tmp/det1.jsonl
@@ -30,24 +27,31 @@ npx tsx src/headless/cli.ts --seed 42 --night 1 --ticks 600 --out /tmp/det2.json
 diff -u /tmp/det1.jsonl /tmp/det2.jsonl
 ```
 
-- Pass condition: `diff -u` exits `0` with empty output (byte-identical JSONL).
+- Pass: `diff -u` exits `0` with empty output (byte-identical).
+- Bad inputs/scenario (`--inputs docs/proof/scenarios/bad-inputs.json`) must exit with code `2` and non-empty `stderr`.
 
-## 3. Verify Exit Code 2 on Bad Input/Scenario
+## 3. Run Phase 4 Soak Test (Headless)
 
 ```bash
-npx tsx src/headless/cli.ts \
-  --seed 1 --night 1 \
-  --inputs docs/proof/scenarios/bad-inputs.json \
-  --ticks 10 --out /tmp/bad.jsonl 2>/tmp/bad.err
-echo "exit=$?"
-cat /tmp/bad.err
+npx tsx src/headless/soak.ts --seed 7 --nights 10 --out soak.json
 ```
 
-- Pass condition: exit code is `2` and stderr is non-empty.
+- Cycles 10 Nights (`1 -> 2 -> 3`, seed `7 + i`) in one process.
+- Pass: `crashes === 0` and `mem_end_mb <= 1.2 * mem_start_mb`.
 
-## 4. Save Evidence under `docs/proof/`
+## 4. Run Phase 4 Benchmark & Leaderboard Export (Launcher)
 
-1. Store scenario/input JSON files in `docs/proof/scenarios/`.
-2. Run the full suite (`npm run verify`) to confirm typecheck, unit tests, and headless checks all pass.
-3. Record a traceability table in `docs/proof/phase-<N>.md` mapping each requirement -> command/scenario -> observed result (`PASS` or honest `NOT VERIFIED` with reason).
-4. Never hand-edit JSONL outputs or weaken assertions to make a check pass.
+```bash
+npm run build
+node scripts/play.mjs --bench --seed 42 --duration 30 --out bench.json
+node scripts/play.mjs --export-leaderboard /tmp/lb.json
+```
+
+- Bench requires Chrome/Chromium (`1280x720`, 200 shades, 100 motes, creative extras OFF, `3 s` warm-up + `--duration`). Pass thresholds: `avg_fps >= 60`, `p1_low_fps >= 30`, `load_ms <= 10000`.
+- `--export-leaderboard` writes `{"entries":[...]}` in order and exits `0` without starting the server.
+
+## 5. Save Evidence under `docs/proof/`
+
+1. Run `npm run verify` (`typecheck` + `vitest` + `scripts/verify.sh`).
+2. Record a traceability table in `docs/proof/phase-<N>.md` (`PASS` or honest `NOT VERIFIED` with reason).
+3. Never hand-edit JSONL, `bench.json`, or `soak.json` outputs, or weaken assertions to make a check pass.

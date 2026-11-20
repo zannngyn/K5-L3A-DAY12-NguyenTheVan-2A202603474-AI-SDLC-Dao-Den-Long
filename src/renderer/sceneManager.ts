@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import {
+  TUNING,
   getGroundHeight,
   nightConfig,
   type CharmState,
@@ -13,33 +14,23 @@ import {
   type SimSnapshot,
 } from "../sim";
 import { MothCompanion } from "./mothCompanion";
-import { PALETTE } from "./palette";
+import { getActivePalette, PALETTE, type ActivePalette } from "./palette";
 
 interface LanternVisual {
   group: THREE.Group;
   coreMesh: THREE.Mesh;
   coreMat: THREE.MeshStandardMaterial;
+  roofMesh: THREE.Mesh;
+  tornGroup: THREE.Group;
+  fuelBarGroup: THREE.Group;
+  fuelBarFill: THREE.Mesh;
+  fuelBarFillMat: THREE.MeshBasicMaterial;
+  fuelBarBgMat: THREE.MeshBasicMaterial;
   safeRing: THREE.Mesh;
   warmDisc: THREE.Mesh;
 }
 
-interface MoteVisual {
-  group: THREE.Group;
-  coreMesh: THREE.Mesh;
-  haloMesh: THREE.Mesh;
-  kind: "random" | "dropped";
-  phase: number;
-}
-
-interface ShadeVisual {
-  group: THREE.Group;
-  bodyMesh: THREE.Mesh;
-  tailMesh: THREE.Mesh;
-  bodyMat: THREE.MeshStandardMaterial;
-  eyeLeftMat: THREE.MeshBasicMaterial;
-  eyeRightMat: THREE.MeshBasicMaterial;
-  stunHalo: THREE.Mesh;
-  spawnRing: THREE.Mesh;
+interface ShadeInterp {
   phase: number;
   prevX: number;
   prevY: number;
@@ -47,6 +38,10 @@ interface ShadeVisual {
   currX: number;
   currY: number;
   currZ: number;
+}
+
+export interface SceneManagerOptions {
+  benchMode?: boolean;
 }
 
 interface DrifterVisual {
@@ -88,8 +83,10 @@ export interface OffscreenArrowProjection {
   distanceM: number;
 }
 
-const SAFE_RADIUS = 6.0;
-const PULSE_RADIUS = 5.0;
+const SAFE_RADIUS = TUNING.safe_radius;
+const PULSE_RADIUS = TUNING.pulse_radius;
+const FUEL_BAR_WIDTH = 1.25;
+const FUEL_BAR_HEIGHT = 0.16;
 const CAMERA_ORBIT_RADIUS = 12.5;
 const CAMERA_LOOK_HEIGHT = 1.35;
 const CAMERA_MIN_Y = 0.35;
@@ -99,9 +96,27 @@ const TELEPORT_SNAP_DIST_SQ = 4.0;
 const MAX_POOLED_LANTERN_LIGHTS = 3; // + 1 hat light = 4 active PointLights max
 const MAX_PULSE_WAVES = 4;
 const WIND_LEAF_COUNT = 44;
+const MAX_MOTE_INSTANCES = 256;
+const MAX_SHADE_INSTANCES = 256;
+const DRAIN_BEAM_MAX_DIST_SQ = 45 * 45;
+const BENCH_WIDTH = 1280;
+const BENCH_HEIGHT = 720;
+const BENCH_ORBIT_RADIUS = 30;
+const BENCH_ORBIT_HEIGHT = 15;
+const BENCH_ORBIT_PERIOD_S = 15;
+const UP_VEC = new THREE.Vector3(0, 1, 0);
+
+function hashIdPhase(id: string, mult: number): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * mult + id.charCodeAt(i)) | 0;
+  }
+  return (Math.abs(hash) % 628) / 100;
+}
 
 export class SceneManager {
   private readonly container: HTMLElement;
+  private readonly benchMode: boolean;
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
@@ -121,16 +136,33 @@ export class SceneManager {
   private readonly playerModel: THREE.Group;
   private readonly charmAuraRing: THREE.Mesh;
   private readonly carriedOrbs: THREE.Mesh[] = [];
-  private readonly moth: MothCompanion;
+  private readonly moth: MothCompanion | null;
 
   private readonly lanterns = new Map<string, LanternVisual>();
-  private readonly motes = new Map<string, MoteVisual>();
-  private readonly shades = new Map<string, ShadeVisual>();
+  private readonly shadeInterps = new Map<string, ShadeInterp>();
   private readonly drifters = new Map<string, DrifterVisual>();
   private readonly charms = new Map<string, CharmVisual>();
   private readonly pulseWaves: PulseWave[] = [];
   private readonly windLeaves: WindLeaf[] = [];
   private readonly windLeavesGroup = new THREE.Group();
+
+  // InstancedMesh pools for high-density motes & shades (200 shades + 100 motes @ >=60 FPS)
+  private readonly randomMoteCoreInst: THREE.InstancedMesh;
+  private readonly randomMoteHaloInst: THREE.InstancedMesh;
+  private readonly droppedMoteCoreInst: THREE.InstancedMesh;
+  private readonly droppedMoteHaloInst: THREE.InstancedMesh;
+  private readonly shadeBodyMat: THREE.MeshStandardMaterial;
+  private readonly shadeStunBodyMat: THREE.MeshStandardMaterial;
+  private readonly shadeEyeMat: THREE.MeshBasicMaterial;
+  private readonly shadeDrainBeamMat: THREE.MeshBasicMaterial;
+  private readonly shadeBodyInst: THREE.InstancedMesh;
+  private readonly shadeTailInst: THREE.InstancedMesh;
+  private readonly shadeStunBodyInst: THREE.InstancedMesh;
+  private readonly shadeStunTailInst: THREE.InstancedMesh;
+  private readonly shadeEyeInst: THREE.InstancedMesh;
+  private readonly shadeStunHaloInst: THREE.InstancedMesh;
+  private readonly shadeSpawnRingInst: THREE.InstancedMesh;
+  private readonly shadeDrainBeamInst: THREE.InstancedMesh;
 
   // Shared geometries & materials (reused across entities to avoid GC / draw overhead)
   private readonly sharedGeos: {
@@ -138,6 +170,10 @@ export class SceneManager {
     lanternPole: THREE.CylinderGeometry;
     lanternRoof: THREE.ConeGeometry;
     lanternCore: THREE.CylinderGeometry;
+    tornHole: THREE.ConeGeometry;
+    tornFlap: THREE.PlaneGeometry;
+    fuelBarBg: THREE.PlaneGeometry;
+    fuelBarFill: THREE.PlaneGeometry;
     safeRing: THREE.RingGeometry;
     warmDisc: THREE.CircleGeometry;
     moteCore: THREE.OctahedronGeometry;
@@ -149,6 +185,7 @@ export class SceneManager {
     shadeEye: THREE.SphereGeometry;
     stunHalo: THREE.TorusGeometry;
     spawnRing: THREE.RingGeometry;
+    drainBeam: THREE.CylinderGeometry;
     drifterSeg: THREE.BoxGeometry;
     drifterLoot: THREE.OctahedronGeometry;
     charmBody: THREE.BoxGeometry;
@@ -163,6 +200,8 @@ export class SceneManager {
     sand: THREE.MeshStandardMaterial;
     wood: THREE.MeshStandardMaterial;
     stone: THREE.MeshStandardMaterial;
+    tornHole: THREE.MeshBasicMaterial;
+    tornFlap: THREE.MeshStandardMaterial;
     cloudSea: THREE.MeshBasicMaterial;
     gold: THREE.MeshStandardMaterial;
     moteCore: THREE.MeshStandardMaterial;
@@ -181,6 +220,8 @@ export class SceneManager {
     windLeaf: THREE.MeshBasicMaterial;
   };
 
+  private activePalette: ActivePalette = getActivePalette(false);
+
   private readonly colorSky = new THREE.Color(PALETTE.nightSky);
   private readonly colorMist = new THREE.Color(PALETTE.nightMist);
   private readonly colorGrass = new THREE.Color(PALETTE.grass);
@@ -191,6 +232,13 @@ export class SceneManager {
   private readonly cameraPos = new THREE.Vector3(0, 6.0, -11.5);
   private readonly cameraLook = new THREE.Vector3(0, CAMERA_LOOK_HEIGHT, 0);
   private readonly scratchVec = new THREE.Vector3();
+  private readonly scratchVec2 = new THREE.Vector3();
+  private readonly scratchPos = new THREE.Vector3();
+  private readonly scratchScale = new THREE.Vector3();
+  private readonly scratchQuat = new THREE.Quaternion();
+  private readonly scratchEuler = new THREE.Euler();
+  private readonly scratchMat = new THREE.Matrix4();
+  private readonly scratchColor = new THREE.Color();
   private readonly seenIds = new Set<string>();
   private readonly lightCandidates: Array<{ lantern: LanternState; distSq: number }> = [];
 
@@ -198,6 +246,7 @@ export class SceneManager {
   private readonly currPlayerPos: [number, number, number] = [0, 0, 0];
   private readonly interpPlayerPos: [number, number, number] = [0, 0, 0];
 
+  private reducedMotion = false;
   private lastPlayerX = 0;
   private lastPlayerZ = 0;
   private playerFacingYaw = 0;
@@ -207,15 +256,22 @@ export class SceneManager {
   private smoothedLitRatio = 0;
   private dashFlashTimer = 0;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, options: SceneManagerOptions = {}) {
     this.container = container;
+    this.benchMode = Boolean(options.benchMode);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    this.renderer.setSize(
-      container.clientWidth || window.innerWidth,
-      container.clientHeight || window.innerHeight
-    );
+    this.renderer.shadowMap.enabled = false;
+    if (this.benchMode) {
+      this.renderer.setPixelRatio(1);
+      this.renderer.setSize(BENCH_WIDTH, BENCH_HEIGHT, false);
+    } else {
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      this.renderer.setSize(
+        container.clientWidth || window.innerWidth,
+        container.clientHeight || window.innerHeight
+      );
+    }
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.15;
@@ -226,9 +282,10 @@ export class SceneManager {
     this.scene.fog = this.fog;
     this.scene.background = new THREE.Color(PALETTE.nightSky);
 
-    const aspect =
-      (container.clientWidth || window.innerWidth) /
-      Math.max(1, container.clientHeight || window.innerHeight);
+    const aspect = this.benchMode
+      ? BENCH_WIDTH / BENCH_HEIGHT
+      : (container.clientWidth || window.innerWidth) /
+        Math.max(1, container.clientHeight || window.innerHeight);
     this.camera = new THREE.PerspectiveCamera(56, aspect, 0.2, 260);
     this.camera.position.copy(this.cameraPos);
     this.camera.lookAt(this.cameraLook);
@@ -275,6 +332,10 @@ export class SceneManager {
       lanternPole: new THREE.CylinderGeometry(0.13, 0.18, 3.6, 8),
       lanternRoof: new THREE.ConeGeometry(0.75, 0.48, 6),
       lanternCore: new THREE.CylinderGeometry(0.36, 0.32, 0.78, 6),
+      tornHole: new THREE.ConeGeometry(0.16, 0.34, 3),
+      tornFlap: new THREE.PlaneGeometry(0.22, 0.24),
+      fuelBarBg: new THREE.PlaneGeometry(FUEL_BAR_WIDTH + 0.08, FUEL_BAR_HEIGHT + 0.08),
+      fuelBarFill: new THREE.PlaneGeometry(FUEL_BAR_WIDTH, FUEL_BAR_HEIGHT),
       safeRing: safeRingGeo,
       warmDisc: warmDiscGeo,
       moteCore: new THREE.OctahedronGeometry(0.22, 0),
@@ -286,6 +347,7 @@ export class SceneManager {
       shadeEye: new THREE.SphereGeometry(0.11, 8, 8),
       stunHalo: stunHaloGeo,
       spawnRing: spawnRingGeo,
+      drainBeam: new THREE.CylinderGeometry(0.055, 0.11, 1.0, 6),
       drifterSeg: new THREE.BoxGeometry(0.38, 0.12, 0.62),
       drifterLoot: new THREE.OctahedronGeometry(0.13, 0),
       charmBody: new THREE.BoxGeometry(0.42, 0.68, 0.07),
@@ -315,6 +377,15 @@ export class SceneManager {
         color: PALETTE.unlitLantern,
         roughness: 0.9,
         flatShading: true,
+      }),
+      tornHole: new THREE.MeshBasicMaterial({
+        color: 0x0b0e18,
+        side: THREE.DoubleSide,
+      }),
+      tornFlap: new THREE.MeshStandardMaterial({
+        color: 0x3b3f4c,
+        roughness: 0.95,
+        side: THREE.DoubleSide,
       }),
       cloudSea: new THREE.MeshBasicMaterial({
         color: PALETTE.cloudSea,
@@ -442,6 +513,143 @@ export class SceneManager {
     }
     this.scene.add(this.windLeavesGroup);
 
+    // InstancedMesh pools for Motes (zero per-mote draw calls)
+    this.randomMoteCoreInst = new THREE.InstancedMesh(
+      this.sharedGeos.moteCore,
+      this.sharedMats.moteCore,
+      MAX_MOTE_INSTANCES
+    );
+    this.randomMoteCoreInst.count = 0;
+    this.randomMoteCoreInst.frustumCulled = false;
+
+    this.randomMoteHaloInst = new THREE.InstancedMesh(
+      this.sharedGeos.moteHalo,
+      this.sharedMats.moteHalo,
+      MAX_MOTE_INSTANCES
+    );
+    this.randomMoteHaloInst.count = 0;
+    this.randomMoteHaloInst.frustumCulled = false;
+
+    this.droppedMoteCoreInst = new THREE.InstancedMesh(
+      this.sharedGeos.droppedCore,
+      this.sharedMats.droppedCore,
+      MAX_MOTE_INSTANCES
+    );
+    this.droppedMoteCoreInst.count = 0;
+    this.droppedMoteCoreInst.frustumCulled = false;
+
+    this.droppedMoteHaloInst = new THREE.InstancedMesh(
+      this.sharedGeos.droppedHalo,
+      this.sharedMats.droppedHalo,
+      MAX_MOTE_INSTANCES
+    );
+    this.droppedMoteHaloInst.count = 0;
+    this.droppedMoteHaloInst.frustumCulled = false;
+
+    this.scene.add(
+      this.randomMoteCoreInst,
+      this.randomMoteHaloInst,
+      this.droppedMoteCoreInst,
+      this.droppedMoteHaloInst
+    );
+
+    // InstancedMesh pools for Shades (200 shades rendered in 3-4 draw calls)
+    this.shadeBodyMat = new THREE.MeshStandardMaterial({
+      color: PALETTE.shadeBody,
+      emissive: this.activePalette.shadeOutline,
+      emissiveIntensity: 0.34,
+      roughness: 0.7,
+      flatShading: true,
+    });
+    this.shadeStunBodyMat = new THREE.MeshStandardMaterial({
+      color: PALETTE.shadeStunned,
+      emissive: PALETTE.shadeStunned,
+      emissiveIntensity: 0.42,
+      roughness: 0.7,
+      flatShading: true,
+    });
+    this.shadeEyeMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    this.shadeDrainBeamMat = new THREE.MeshBasicMaterial({
+      color: this.activePalette.shadeOutline,
+      transparent: true,
+      opacity: 0.72,
+    });
+
+    this.shadeBodyInst = new THREE.InstancedMesh(
+      this.sharedGeos.shadeBody,
+      this.shadeBodyMat,
+      MAX_SHADE_INSTANCES
+    );
+    this.shadeBodyInst.count = 0;
+    this.shadeBodyInst.frustumCulled = false;
+
+    this.shadeTailInst = new THREE.InstancedMesh(
+      this.sharedGeos.shadeTail,
+      this.shadeBodyMat,
+      MAX_SHADE_INSTANCES
+    );
+    this.shadeTailInst.count = 0;
+    this.shadeTailInst.frustumCulled = false;
+
+    this.shadeStunBodyInst = new THREE.InstancedMesh(
+      this.sharedGeos.shadeBody,
+      this.shadeStunBodyMat,
+      MAX_SHADE_INSTANCES
+    );
+    this.shadeStunBodyInst.count = 0;
+    this.shadeStunBodyInst.frustumCulled = false;
+
+    this.shadeStunTailInst = new THREE.InstancedMesh(
+      this.sharedGeos.shadeTail,
+      this.shadeStunBodyMat,
+      MAX_SHADE_INSTANCES
+    );
+    this.shadeStunTailInst.count = 0;
+    this.shadeStunTailInst.frustumCulled = false;
+
+    this.shadeEyeInst = new THREE.InstancedMesh(
+      this.sharedGeos.shadeEye,
+      this.shadeEyeMat,
+      MAX_SHADE_INSTANCES * 2
+    );
+    this.shadeEyeInst.count = 0;
+    this.shadeEyeInst.frustumCulled = false;
+
+    this.shadeStunHaloInst = new THREE.InstancedMesh(
+      this.sharedGeos.stunHalo,
+      this.sharedMats.stunHalo,
+      MAX_SHADE_INSTANCES
+    );
+    this.shadeStunHaloInst.count = 0;
+    this.shadeStunHaloInst.frustumCulled = false;
+
+    this.shadeSpawnRingInst = new THREE.InstancedMesh(
+      this.sharedGeos.spawnRing,
+      this.sharedMats.spawnRing,
+      MAX_SHADE_INSTANCES
+    );
+    this.shadeSpawnRingInst.count = 0;
+    this.shadeSpawnRingInst.frustumCulled = false;
+
+    this.shadeDrainBeamInst = new THREE.InstancedMesh(
+      this.sharedGeos.drainBeam,
+      this.shadeDrainBeamMat,
+      MAX_SHADE_INSTANCES
+    );
+    this.shadeDrainBeamInst.count = 0;
+    this.shadeDrainBeamInst.frustumCulled = false;
+
+    this.scene.add(
+      this.shadeBodyInst,
+      this.shadeTailInst,
+      this.shadeStunBodyInst,
+      this.shadeStunTailInst,
+      this.shadeEyeInst,
+      this.shadeStunHaloInst,
+      this.shadeSpawnRingInst,
+      this.shadeDrainBeamInst
+    );
+
     // Player (May)
     const { root, model, charmAura } = this.buildPlayer();
     this.playerGroup = root;
@@ -449,10 +657,44 @@ export class SceneManager {
     this.charmAuraRing = charmAura;
     this.scene.add(this.playerGroup);
 
-    // Lantern Moth Companion ("Bướm Đèn")
-    this.moth = new MothCompanion(this.scene);
+    // Lantern Moth Companion ("Bướm Đèn") — OFF in benchmark mode
+    this.moth = this.benchMode ? null : new MothCompanion(this.scene);
 
     window.addEventListener("resize", this.handleResize);
+  }
+
+  public setColorBlind(enabled: boolean): void {
+    this.activePalette = getActivePalette(enabled);
+    this.sharedMats.spawnRing.color.setHex(this.activePalette.shadeOutline);
+    this.sharedMats.droppedHalo.color.setHex(this.activePalette.dangerUi);
+    this.shadeBodyMat.emissive.setHex(this.activePalette.shadeOutline);
+    this.shadeDrainBeamMat.color.setHex(this.activePalette.shadeOutline);
+  }
+
+  public setReducedMotion(enabled: boolean): void {
+    this.reducedMotion = enabled;
+  }
+
+  public getRendererInfo(): string {
+    const gl = this.renderer.getContext();
+    let gpu = "WebGL";
+    try {
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      if (dbg) {
+        const unmasked = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+        if (typeof unmasked === "string" && unmasked.length > 0) {
+          gpu = unmasked;
+        }
+      } else {
+        const r = gl.getParameter(gl.RENDERER);
+        if (typeof r === "string" && r.length > 0) {
+          gpu = r;
+        }
+      }
+    } catch {
+      // Fallback to default WebGL string
+    }
+    return `Three.js r${THREE.REVISION} / ${gpu}`;
   }
 
   public reset(snapshot: SimSnapshot): void {
@@ -482,19 +724,25 @@ export class SceneManager {
     for (const l of this.lanterns.values()) {
       this.scene.remove(l.group);
       l.coreMat.dispose();
+      l.fuelBarFillMat.dispose();
+      l.fuelBarBgMat.dispose();
     }
     this.lanterns.clear();
 
-    for (const m of this.motes.values()) this.scene.remove(m.group);
-    this.motes.clear();
+    this.randomMoteCoreInst.count = 0;
+    this.randomMoteHaloInst.count = 0;
+    this.droppedMoteCoreInst.count = 0;
+    this.droppedMoteHaloInst.count = 0;
 
-    for (const s of this.shades.values()) {
-      this.scene.remove(s.group);
-      s.bodyMat.dispose();
-      s.eyeLeftMat.dispose();
-      s.eyeRightMat.dispose();
-    }
-    this.shades.clear();
+    this.shadeInterps.clear();
+    this.shadeBodyInst.count = 0;
+    this.shadeTailInst.count = 0;
+    this.shadeStunBodyInst.count = 0;
+    this.shadeStunTailInst.count = 0;
+    this.shadeEyeInst.count = 0;
+    this.shadeStunHaloInst.count = 0;
+    this.shadeSpawnRingInst.count = 0;
+    this.shadeDrainBeamInst.count = 0;
 
     for (const d of this.drifters.values()) {
       this.scene.remove(d.group);
@@ -522,7 +770,7 @@ export class SceneManager {
     // Snap camera immediately to player start (no drift/smoothing across reset)
     this.cameraTarget.set(px, py, pz);
     this.applyCameraOrbit(0, CAMERA_DEFAULT_PITCH_DEG);
-    this.moth.reset(snapshot.player.pos);
+    this.moth?.reset(snapshot.player.pos);
   }
 
   /**
@@ -555,33 +803,38 @@ export class SceneManager {
 
     for (let i = 0; i < snapshot.shades.length; i++) {
       const s = snapshot.shades[i];
-      const vis = this.shades.get(s.id);
-      if (!vis) continue;
-      const sdx = s.pos[0] - vis.currX;
-      const sdy = s.pos[1] - vis.currY;
-      const sdz = s.pos[2] - vis.currZ;
+      const interp = this.shadeInterps.get(s.id);
+      if (!interp) continue;
+      const sdx = s.pos[0] - interp.currX;
+      const sdy = s.pos[1] - interp.currY;
+      const sdz = s.pos[2] - interp.currZ;
       if (sdx * sdx + sdy * sdy + sdz * sdz > TELEPORT_SNAP_DIST_SQ) {
-        vis.prevX = s.pos[0];
-        vis.prevY = s.pos[1];
-        vis.prevZ = s.pos[2];
+        interp.prevX = s.pos[0];
+        interp.prevY = s.pos[1];
+        interp.prevZ = s.pos[2];
       } else {
-        vis.prevX = vis.currX;
-        vis.prevY = vis.currY;
-        vis.prevZ = vis.currZ;
+        interp.prevX = interp.currX;
+        interp.prevY = interp.currY;
+        interp.prevZ = interp.currZ;
       }
-      vis.currX = s.pos[0];
-      vis.currY = s.pos[1];
-      vis.currZ = s.pos[2];
+      interp.currX = s.pos[0];
+      interp.currY = s.pos[1];
+      interp.currZ = s.pos[2];
     }
   }
 
   public handleEvents(events: readonly SimEvent[], snapshot: SimSnapshot): void {
-    this.moth.onEvents(events);
+    this.moth?.onEvents(events);
     for (const ev of events) {
       if (ev.name === "pulse") {
         this.spawnPulseWave(snapshot.player.pos);
       } else if (ev.name === "dash") {
         this.dashFlashTimer = 0.22;
+      } else if (ev.name === "lantern_out") {
+        // Drop ambient contribution immediately when a lantern goes out
+        const total = Math.max(1, snapshot.lanterns.length);
+        const litCount = snapshot.lanterns.filter((l) => l.lit).length;
+        this.smoothedLitRatio = litCount / total;
       }
     }
   }
@@ -624,20 +877,59 @@ export class SceneManager {
     this.updatePlayer(snapshot, this.interpPlayerPos, animDt);
     this.syncLanterns(snapshot.lanterns, this.interpPlayerPos);
     this.syncMotes(snapshot.motes);
-    this.syncShades(snapshot.shades, clampedAlpha, paused);
+    this.syncShades(snapshot.shades, snapshot.lanterns, clampedAlpha, paused);
     this.syncDrifters(snapshot.drifters);
     this.syncCharms(snapshot.charms);
     this.updateJumpPads(animDt);
     this.updateWindLeaves(snapshot, this.interpPlayerPos, animDt);
     this.updatePulseWaves(animDt);
-    this.moth.update(snapshot, animDt);
+    this.moth?.update(snapshot, animDt);
     this.updateCamera(this.interpPlayerPos, camYawDeg, camPitchDeg, animDt, paused);
 
     this.renderer.render(this.scene, this.camera);
   }
 
   /**
-   * Projects the nearest unlit lantern to viewport coordinates for the off-screen HUD arrow.
+   * Benchmark render path: fixed orbit camera (center 0,0,0, radius 30, Y=15,
+   * start angle 0 at (30,15,0), CCW from above, 15s/rev), Moth & creative extras OFF.
+   */
+  public renderBench(
+    snapshot: SimSnapshot,
+    orbitElapsedSec: number,
+    dtSec: number,
+    alpha = 1
+  ): void {
+    this.ensureNightEnvironment(snapshot.night);
+    this.elapsed += dtSec;
+
+    const clampedAlpha = Math.max(0, Math.min(1, alpha));
+    this.interpPlayerPos[0] = snapshot.player.pos[0];
+    this.interpPlayerPos[1] = snapshot.player.pos[1];
+    this.interpPlayerPos[2] = snapshot.player.pos[2];
+
+    const angle = (orbitElapsedSec / BENCH_ORBIT_PERIOD_S) * Math.PI * 2;
+    this.camera.position.set(
+      BENCH_ORBIT_RADIUS * Math.cos(angle),
+      BENCH_ORBIT_HEIGHT,
+      -BENCH_ORBIT_RADIUS * Math.sin(angle)
+    );
+    this.camera.lookAt(0, 0, 0);
+
+    this.updateLightingAndFog(snapshot, dtSec);
+    this.updatePlayer(snapshot, this.interpPlayerPos, dtSec);
+    this.syncLanterns(snapshot.lanterns, this.interpPlayerPos);
+    this.syncMotes(snapshot.motes);
+    this.syncShades(snapshot.shades, snapshot.lanterns, clampedAlpha, false);
+    this.syncDrifters(snapshot.drifters);
+    this.syncCharms(snapshot.charms);
+    this.updateJumpPads(dtSec);
+
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * Projects the nearest lantern that can receive motes (unlit, or lit not full)
+   * to viewport coordinates for the off-screen HUD arrow.
    * Zero allocations — writes directly into `out`.
    */
   public projectNearestUnlitLantern(
@@ -649,11 +941,11 @@ export class SceneManager {
     let bestDistSq = Infinity;
     for (let i = 0; i < snapshot.lanterns.length; i++) {
       const l = snapshot.lanterns[i];
-      if (l.lit) continue;
+      if (l.lit && l.fuel >= TUNING.fuel_max) continue;
       const dx = l.pos[0] - px;
       const dz = l.pos[2] - pz;
       const dSq = dx * dx + dz * dz;
-      if (dSq < bestDistSq) {
+      if (dSq < bestDistSq - 1e-6 || (Math.abs(dSq - bestDistSq) <= 1e-6 && nearest && l.id < nearest.id)) {
         bestDistSq = dSq;
         nearest = l;
       }
@@ -664,7 +956,26 @@ export class SceneManager {
       return;
     }
 
-    this.scratchVec.set(nearest.pos[0], nearest.pos[1] + 2.8, nearest.pos[2]);
+    this.projectWorldPointToEdge(
+      [nearest.pos[0], nearest.pos[1] + 2.8, nearest.pos[2]],
+      Math.sqrt(bestDistSq),
+      out,
+      false
+    );
+  }
+
+  /**
+   * Projects any world point to an edge-of-screen directional arrow.
+   * When `alwaysEdge` is true (e.g. Shade-spawned accessibility cue), shows an edge
+   * arrow pointing in the target's direction even if partially on-screen.
+   */
+  public projectWorldPointToEdge(
+    pos: readonly [number, number, number],
+    distanceM: number,
+    out: OffscreenArrowProjection,
+    alwaysEdge = false
+  ): void {
+    this.scratchVec.set(pos[0], pos[1], pos[2]);
     this.scratchVec.project(this.camera);
 
     const behind = this.scratchVec.z > 1.0;
@@ -672,7 +983,7 @@ export class SceneManager {
     let ndcY = this.scratchVec.y;
 
     const onScreen = !behind && ndcX >= -0.92 && ndcX <= 0.92 && ndcY >= -0.9 && ndcY <= 0.9;
-    if (onScreen) {
+    if (onScreen && !alwaysEdge) {
       out.visible = false;
       return;
     }
@@ -682,11 +993,10 @@ export class SceneManager {
       ndcY = -ndcY;
     }
 
-    const len = Math.hypot(ndcX, ndcY) || 1;
-    const dirX = ndcX / len;
-    const dirY = ndcY / len;
+    const len = Math.hypot(ndcX, ndcY);
+    const dirX = len > 1e-4 ? ndcX / len : 0;
+    const dirY = len > 1e-4 ? ndcY / len : 1;
 
-    // Clamp to an inset screen border ellipse/box
     const marginX = 0.86;
     const marginY = 0.82;
     const scaleX = Math.abs(dirX) > 1e-4 ? marginX / Math.abs(dirX) : 999;
@@ -699,14 +1009,13 @@ export class SceneManager {
     out.visible = true;
     out.screenX = (edgeX + 1) * 0.5;
     out.screenY = (1 - edgeY) * 0.5;
-    // Screen Y is inverted relative to NDC Y
     out.angleRad = Math.atan2(-dirY, dirX);
-    out.distanceM = Math.sqrt(bestDistSq);
+    out.distanceM = distanceM;
   }
 
   public dispose(): void {
     window.removeEventListener("resize", this.handleResize);
-    this.moth.dispose();
+    this.moth?.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
@@ -1099,10 +1408,10 @@ export class SceneManager {
     charmAura.visible = false;
     root.add(charmAura);
 
-    // Orbiting carried mote indicators (up to 10)
+    // Orbiting carried mote indicators (up to capacity_max = 20)
     const orbGeo = new THREE.OctahedronGeometry(0.075, 0);
     const orbMat = new THREE.MeshBasicMaterial({ color: PALETTE.moteCore });
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < TUNING.capacity_max; i++) {
       const orb = new THREE.Mesh(orbGeo, orbMat);
       orb.visible = false;
       root.add(orb);
@@ -1125,9 +1434,9 @@ export class SceneManager {
     pole.position.y = 2.0;
     group.add(pole);
 
-    const roof = new THREE.Mesh(this.sharedGeos.lanternRoof, this.sharedMats.wood);
-    roof.position.y = 4.22;
-    group.add(roof);
+    const roofMesh = new THREE.Mesh(this.sharedGeos.lanternRoof, this.sharedMats.wood);
+    roofMesh.position.y = 4.22;
+    group.add(roofMesh);
 
     // Per-lantern core material so each lantern displays its own deposit/lit state
     const coreMat = new THREE.MeshStandardMaterial({
@@ -1140,6 +1449,50 @@ export class SceneManager {
     coreMesh.position.y = 3.65;
     group.add(coreMesh);
 
+    // Torn-paper overlay (jagged dark openings + outward torn flaps) visible when unlit
+    const tornGroup = new THREE.Group();
+    tornGroup.position.y = 3.62;
+    for (let i = 0; i < 3; i++) {
+      const angle = (i / 3) * Math.PI * 2 + 0.35;
+      const r = 0.355;
+      const hole = new THREE.Mesh(this.sharedGeos.tornHole, this.sharedMats.tornHole);
+      hole.position.set(Math.cos(angle) * r, (i % 2 === 0 ? 0.04 : -0.05), Math.sin(angle) * r);
+      hole.rotation.set(0.18, -angle, Math.PI * (i % 2 === 0 ? 0.85 : 0.15));
+      tornGroup.add(hole);
+
+      const flap = new THREE.Mesh(this.sharedGeos.tornFlap, this.sharedMats.tornFlap);
+      flap.position.set(Math.cos(angle + 0.28) * (r + 0.06), -0.04, Math.sin(angle + 0.28) * (r + 0.06));
+      flap.rotation.set(0.35, -angle + 0.3, 0.42 * (i % 2 === 0 ? 1 : -1));
+      tornGroup.add(flap);
+    }
+    group.add(tornGroup);
+
+    // Billboarded fuel bar above lit lantern
+    const fuelBarGroup = new THREE.Group();
+    fuelBarGroup.position.y = 4.92;
+    const fuelBarBgMat = new THREE.MeshBasicMaterial({
+      color: 0x0e1430,
+      transparent: true,
+      opacity: 0.82,
+      side: THREE.DoubleSide,
+      depthTest: true,
+    });
+    const fuelBarBg = new THREE.Mesh(this.sharedGeos.fuelBarBg, fuelBarBgMat);
+    fuelBarGroup.add(fuelBarBg);
+
+    const fuelBarFillMat = new THREE.MeshBasicMaterial({
+      color: PALETTE.litLantern,
+      transparent: true,
+      opacity: 0.95,
+      side: THREE.DoubleSide,
+      depthTest: true,
+    });
+    const fuelBarFill = new THREE.Mesh(this.sharedGeos.fuelBarFill, fuelBarFillMat);
+    fuelBarFill.position.z = 0.01;
+    fuelBarGroup.add(fuelBarFill);
+    fuelBarGroup.visible = false;
+    group.add(fuelBarGroup);
+
     const safeRing = new THREE.Mesh(this.sharedGeos.safeRing, this.sharedMats.safeRing);
     safeRing.position.y = 0.035;
     safeRing.visible = false;
@@ -1151,93 +1504,18 @@ export class SceneManager {
     group.add(warmDisc);
 
     this.scene.add(group);
-    return { group, coreMesh, coreMat, safeRing, warmDisc };
-  }
-
-  private createMoteVisual(mote: MoteState): MoteVisual {
-    const group = new THREE.Group();
-    const isDropped = mote.kind === "dropped";
-
-    const coreMesh = new THREE.Mesh(
-      isDropped ? this.sharedGeos.droppedCore : this.sharedGeos.moteCore,
-      isDropped ? this.sharedMats.droppedCore : this.sharedMats.moteCore
-    );
-    group.add(coreMesh);
-
-    const haloMesh = new THREE.Mesh(
-      isDropped ? this.sharedGeos.droppedHalo : this.sharedGeos.moteHalo,
-      isDropped ? this.sharedMats.droppedHalo : this.sharedMats.moteHalo
-    );
-    if (isDropped) {
-      haloMesh.rotation.x = -Math.PI / 2;
-    }
-    group.add(haloMesh);
-
-    let hash = 0;
-    for (let i = 0; i < mote.id.length; i++) hash = (hash * 31 + mote.id.charCodeAt(i)) | 0;
-    const phase = (Math.abs(hash) % 628) / 100;
-
-    this.scene.add(group);
-    return { group, coreMesh, haloMesh, kind: mote.kind, phase };
-  }
-
-  private createShadeVisual(id: string, initialPos: [number, number, number]): ShadeVisual {
-    const group = new THREE.Group();
-
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: PALETTE.shadeBody,
-      emissive: PALETTE.shadeOutline,
-      emissiveIntensity: 0.28,
-      roughness: 0.7,
-      flatShading: true,
-    });
-    const bodyMesh = new THREE.Mesh(this.sharedGeos.shadeBody, bodyMat);
-    bodyMesh.scale.set(1, 1.18, 1);
-    group.add(bodyMesh);
-
-    const tailMesh = new THREE.Mesh(this.sharedGeos.shadeTail, bodyMat);
-    tailMesh.position.y = -0.65;
-    group.add(tailMesh);
-
-    const eyeLeftMat = new THREE.MeshBasicMaterial({ color: PALETTE.shadeOutline });
-    const eyeRightMat = new THREE.MeshBasicMaterial({ color: PALETTE.shadeOutline });
-    const eyeLeft = new THREE.Mesh(this.sharedGeos.shadeEye, eyeLeftMat);
-    eyeLeft.position.set(-0.22, 0.16, 0.56);
-    const eyeRight = new THREE.Mesh(this.sharedGeos.shadeEye, eyeRightMat);
-    eyeRight.position.set(0.22, 0.16, 0.56);
-    group.add(eyeLeft, eyeRight);
-
-    const stunHalo = new THREE.Mesh(this.sharedGeos.stunHalo, this.sharedMats.stunHalo);
-    stunHalo.position.y = 1.05;
-    stunHalo.visible = false;
-    group.add(stunHalo);
-
-    const spawnRing = new THREE.Mesh(this.sharedGeos.spawnRing, this.sharedMats.spawnRing);
-    spawnRing.position.y = -0.92;
-    spawnRing.visible = false;
-    group.add(spawnRing);
-
-    let hash = 0;
-    for (let i = 0; i < id.length; i++) hash = (hash * 37 + id.charCodeAt(i)) | 0;
-    const phase = (Math.abs(hash) % 628) / 100;
-
-    this.scene.add(group);
     return {
       group,
-      bodyMesh,
-      tailMesh,
-      bodyMat,
-      eyeLeftMat,
-      eyeRightMat,
-      stunHalo,
-      spawnRing,
-      phase,
-      prevX: initialPos[0],
-      prevY: initialPos[1],
-      prevZ: initialPos[2],
-      currX: initialPos[0],
-      currY: initialPos[1],
-      currZ: initialPos[2],
+      coreMesh,
+      coreMat,
+      roofMesh,
+      tornGroup,
+      fuelBarGroup,
+      fuelBarFill,
+      fuelBarFillMat,
+      fuelBarBgMat,
+      safeRing,
+      warmDisc,
     };
   }
 
@@ -1323,10 +1601,15 @@ export class SceneManager {
       if (snapshot.lanterns[i].lit) litCount++;
     }
     const targetRatio = litCount / total;
-    this.smoothedLitRatio += (targetRatio - this.smoothedLitRatio) * Math.min(1, dtSec * 3.5);
+    if (targetRatio < this.smoothedLitRatio) {
+      // Lantern went out: drop ambient contribution at once
+      this.smoothedLitRatio = targetRatio;
+    } else {
+      this.smoothedLitRatio += (targetRatio - this.smoothedLitRatio) * Math.min(1, dtSec * 3.5);
+    }
     const r = this.smoothedLitRatio;
 
-    // Exact Ticket-02 ambient formula: 0.15 + 0.55 * (lit / total)
+    // Exact ambient formula: 0.15 + 0.55 * (lit / total)
     this.ambientLight.intensity = 0.15 + 0.55 * r;
 
     // Readable moonlit floor (kept >= Phase 1 brightness even at 0 lit)
@@ -1375,15 +1658,16 @@ export class SceneManager {
     }
 
     // Subtle walk bob, sway, and forward lean applied ONLY to playerModel inside playerGroup
-    const bob = Math.abs(Math.sin(this.walkPhase)) * 0.07 * this.walkBlend;
+    const motionScale = this.reducedMotion ? 0.25 : 1.0;
+    const bob = Math.abs(Math.sin(this.walkPhase)) * 0.07 * this.walkBlend * motionScale;
     this.playerModel.position.y = bob;
-    this.playerModel.rotation.z = Math.sin(this.walkPhase) * 0.045 * this.walkBlend;
-    const dashTilt = this.dashFlashTimer > 0 ? 0.28 : 0;
-    const walkLean = 0.065 * this.walkBlend;
+    this.playerModel.rotation.z = Math.sin(this.walkPhase) * 0.045 * this.walkBlend * motionScale;
+    const dashTilt = this.dashFlashTimer > 0 && !this.reducedMotion ? 0.28 : 0;
+    const walkLean = 0.065 * this.walkBlend * motionScale;
     this.playerModel.rotation.x = Math.max(walkLean, dashTilt);
 
-    // Invulnerability blink driven directly from SimSnapshot
-    if (snapshot.player.invuln) {
+    // Invulnerability blink driven directly from SimSnapshot (steady when reducedMotion)
+    if (snapshot.player.invuln && !this.reducedMotion) {
       this.playerModel.visible = Math.floor(this.elapsed * 16) % 2 === 0;
     } else {
       this.playerModel.visible = true;
@@ -1425,7 +1709,11 @@ export class SceneManager {
   ): void {
     this.seenIds.clear();
     this.lightCandidates.length = 0;
-    const pulse = 1 + Math.sin(this.elapsed * 3.2) * 0.08;
+    const pulse = this.reducedMotion ? 1.0 : 1 + Math.sin(this.elapsed * 3.2) * 0.08;
+    // 1 Hz slow flash for low-fuel (< 30) lanterns & fuel bars (calmer in reducedMotion)
+    const flash1Hz = this.reducedMotion
+      ? 0.72
+      : 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(this.elapsed * Math.PI * 2));
 
     for (let i = 0; i < lanternStates.length; i++) {
       const l = lanternStates[i];
@@ -1438,18 +1726,47 @@ export class SceneManager {
       vis.group.position.set(l.pos[0], l.pos[1], l.pos[2]);
 
       if (l.lit) {
+        const isLowFuel = l.fuel < TUNING.low_fuel_threshold;
+        const hasSafeZone = l.fuel >= TUNING.low_fuel_threshold;
+        const fuelRatio = Math.max(0, Math.min(1, l.fuel / TUNING.fuel_max));
+
+        vis.coreMesh.scale.set(1, 1, 1);
+        vis.roofMesh.position.y = 4.22;
+        vis.tornGroup.visible = false;
+
         vis.coreMat.color.setHex(PALETTE.litLanternCore);
         vis.coreMat.emissive.setHex(PALETTE.litLantern);
-        vis.coreMat.emissiveIntensity = 2.0 * pulse;
-        vis.safeRing.visible = true;
-        vis.warmDisc.visible = true;
+        vis.coreMat.emissiveIntensity = isLowFuel ? 2.0 * flash1Hz : 2.0 * pulse;
+
+        vis.safeRing.visible = hasSafeZone;
+        vis.warmDisc.visible = hasSafeZone;
+
+        // Fuel bar above lit lantern (billboarded toward camera)
+        vis.fuelBarGroup.visible = true;
+        vis.fuelBarGroup.quaternion.copy(this.camera.quaternion);
+        vis.fuelBarFill.scale.x = Math.max(0.001, fuelRatio);
+        vis.fuelBarFill.position.x = -FUEL_BAR_WIDTH * 0.5 * (1 - fuelRatio);
+        vis.fuelBarFillMat.color.setHex(
+          isLowFuel ? this.activePalette.dangerUi : PALETTE.litLantern
+        );
+        vis.fuelBarFillMat.opacity = isLowFuel ? flash1Hz : 0.95;
+        vis.fuelBarBgMat.opacity = isLowFuel ? 0.55 + 0.3 * flash1Hz : 0.82;
       } else {
-        const progress = Math.min(1, l.deposited / 10);
+        const cost = l.ever_lit ? TUNING.relight_cost : TUNING.lantern_cost;
+        const progress = Math.min(1, l.deposited / cost);
+
+        // Unlit lantern: squashed 20% in height + torn-paper look
+        vis.coreMesh.scale.set(1.06, 0.8, 1.06);
+        vis.roofMesh.position.y = 4.14;
+        vis.tornGroup.visible = true;
+
         vis.coreMat.color.setHex(progress > 0 ? PALETTE.litLantern : PALETTE.unlitLantern);
         vis.coreMat.emissive.setHex(PALETTE.litLantern);
-        vis.coreMat.emissiveIntensity = 0.1 + progress * 0.95;
+        vis.coreMat.emissiveIntensity = 0.08 + progress * 0.95;
+
         vis.safeRing.visible = false;
         vis.warmDisc.visible = false;
+        vis.fuelBarGroup.visible = false;
       }
 
       if (l.lit || l.deposited > 0) {
@@ -1463,6 +1780,8 @@ export class SceneManager {
       if (!this.seenIds.has(id)) {
         this.scene.remove(vis.group);
         vis.coreMat.dispose();
+        vis.fuelBarFillMat.dispose();
+        vis.fuelBarBgMat.dispose();
         this.lanterns.delete(id);
       }
     }
@@ -1476,7 +1795,13 @@ export class SceneManager {
         const l = cand.lantern;
         pl.visible = true;
         pl.position.set(l.pos[0], l.pos[1] + 3.65, l.pos[2]);
-        pl.intensity = l.lit ? 4.4 * pulse : (l.deposited / 10) * 1.6;
+        if (l.lit) {
+          const isLowFuel = l.fuel < TUNING.low_fuel_threshold;
+          pl.intensity = isLowFuel ? 4.4 * flash1Hz : 4.4 * pulse;
+        } else {
+          const cost = l.ever_lit ? TUNING.relight_cost : TUNING.lantern_cost;
+          pl.intensity = (l.deposited / cost) * 1.6;
+        }
       } else {
         pl.visible = false;
         pl.intensity = 0;
@@ -1485,131 +1810,301 @@ export class SceneManager {
   }
 
   private syncMotes(moteStates: readonly MoteState[]): void {
-    this.seenIds.clear();
+    let randCount = 0;
+    let dropCount = 0;
+    const oneScale = this.scratchScale.set(1, 1, 1);
+
     for (let i = 0; i < moteStates.length; i++) {
       const m = moteStates[i];
-      this.seenIds.add(m.id);
-      let vis = this.motes.get(m.id);
-      if (!vis) {
-        vis = this.createMoteVisual(m);
-        this.motes.set(m.id, vis);
-      }
+      const phase = hashIdPhase(m.id, 31);
+
       if (m.kind === "dropped") {
-        const floatY = m.pos[1] + 0.45 + 0.14 * Math.sin(this.elapsed * 4.5 + vis.phase);
-        vis.group.position.set(m.pos[0], floatY, m.pos[2]);
-        vis.group.rotation.y = this.elapsed * 3.4 + vis.phase;
-        // Blink when TTL is low (< 2s)
-        if (m.ttl_s !== null && m.ttl_s < 2.0) {
-          vis.group.visible = Math.floor(this.elapsed * 14) % 2 === 0;
-        } else {
-          vis.group.visible = true;
+        if (dropCount >= MAX_MOTE_INSTANCES) continue;
+        // Blink when TTL is low (< 2s), steady when reducedMotion
+        if (!this.reducedMotion && m.ttl_s !== null && m.ttl_s < 2.0) {
+          if (Math.floor(this.elapsed * 14) % 2 !== 0) continue;
         }
+        const floatY = m.pos[1] + 0.45 + 0.14 * Math.sin(this.elapsed * 4.5 + phase);
+        const rotY = this.elapsed * 3.4 + phase;
+
+        this.scratchPos.set(m.pos[0], floatY, m.pos[2]);
+        this.scratchEuler.set(0, rotY, 0);
+        this.scratchQuat.setFromEuler(this.scratchEuler);
+        this.scratchMat.compose(this.scratchPos, this.scratchQuat, oneScale);
+        this.droppedMoteCoreInst.setMatrixAt(dropCount, this.scratchMat);
+
+        this.scratchEuler.set(-Math.PI / 2, rotY, 0);
+        this.scratchQuat.setFromEuler(this.scratchEuler);
+        this.scratchMat.compose(this.scratchPos, this.scratchQuat, oneScale);
+        this.droppedMoteHaloInst.setMatrixAt(dropCount, this.scratchMat);
+        dropCount++;
       } else {
-        const floatY = m.pos[1] + 0.8 + 0.25 * Math.sin(this.elapsed * 2.2 + vis.phase);
-        vis.group.position.set(m.pos[0], floatY, m.pos[2]);
-        vis.group.rotation.y = this.elapsed * 1.8 + vis.phase;
-        vis.group.visible = true;
+        if (randCount >= MAX_MOTE_INSTANCES) continue;
+        const floatY = m.pos[1] + 0.8 + 0.25 * Math.sin(this.elapsed * 2.2 + phase);
+        const rotY = this.elapsed * 1.8 + phase;
+
+        this.scratchPos.set(m.pos[0], floatY, m.pos[2]);
+        this.scratchEuler.set(0, rotY, 0);
+        this.scratchQuat.setFromEuler(this.scratchEuler);
+        this.scratchMat.compose(this.scratchPos, this.scratchQuat, oneScale);
+        this.randomMoteCoreInst.setMatrixAt(randCount, this.scratchMat);
+        this.randomMoteHaloInst.setMatrixAt(randCount, this.scratchMat);
+        randCount++;
       }
     }
 
-    for (const [id, vis] of this.motes.entries()) {
-      if (!this.seenIds.has(id)) {
-        this.scene.remove(vis.group);
-        this.motes.delete(id);
-      }
+    this.randomMoteCoreInst.count = randCount;
+    this.randomMoteHaloInst.count = randCount;
+    this.droppedMoteCoreInst.count = dropCount;
+    this.droppedMoteHaloInst.count = dropCount;
+
+    if (randCount > 0) {
+      this.randomMoteCoreInst.instanceMatrix.needsUpdate = true;
+      this.randomMoteHaloInst.instanceMatrix.needsUpdate = true;
+    }
+    if (dropCount > 0) {
+      this.droppedMoteCoreInst.instanceMatrix.needsUpdate = true;
+      this.droppedMoteHaloInst.instanceMatrix.needsUpdate = true;
     }
   }
 
-  private syncShades(shadeStates: readonly ShadeState[], alpha: number, paused: boolean): void {
+  private syncShades(
+    shadeStates: readonly ShadeState[],
+    lanternStates: readonly LanternState[],
+    alpha: number,
+    paused: boolean
+  ): void {
     this.seenIds.clear();
+    const outlineHex = this.activePalette.shadeOutline;
+    const dangerHex = this.activePalette.dangerUi;
+    const camX = this.camera.position.x;
+    const camZ = this.camera.position.z;
+
+    let normalCount = 0;
+    let stunCount = 0;
+    let eyeCount = 0;
+    let spawnRingCount = 0;
+    let drainBeamCount = 0;
+
     for (let i = 0; i < shadeStates.length; i++) {
       const s = shadeStates[i];
       this.seenIds.add(s.id);
-      let vis = this.shades.get(s.id);
-      if (!vis) {
-        vis = this.createShadeVisual(s.id, s.pos);
-        this.shades.set(s.id, vis);
+      let interp = this.shadeInterps.get(s.id);
+      if (!interp) {
+        interp = {
+          phase: hashIdPhase(s.id, 37),
+          prevX: s.pos[0],
+          prevY: s.pos[1],
+          prevZ: s.pos[2],
+          currX: s.pos[0],
+          currY: s.pos[1],
+          currZ: s.pos[2],
+        };
+        this.shadeInterps.set(s.id, interp);
       }
 
       if (paused) {
-        vis.prevX = s.pos[0];
-        vis.prevY = s.pos[1];
-        vis.prevZ = s.pos[2];
-        vis.currX = s.pos[0];
-        vis.currY = s.pos[1];
-        vis.currZ = s.pos[2];
+        interp.prevX = s.pos[0];
+        interp.prevY = s.pos[1];
+        interp.prevZ = s.pos[2];
+        interp.currX = s.pos[0];
+        interp.currY = s.pos[1];
+        interp.currZ = s.pos[2];
       }
 
-      const sx = vis.prevX + (vis.currX - vis.prevX) * alpha;
-      const sy = vis.prevY + (vis.currY - vis.prevY) * alpha;
-      const sz = vis.prevZ + (vis.currZ - vis.prevZ) * alpha;
+      const sx = interp.prevX + (interp.currX - interp.prevX) * alpha;
+      const sy = interp.prevY + (interp.currY - interp.prevY) * alpha;
+      const sz = interp.prevZ + (interp.currZ - interp.prevZ) * alpha;
+      const hoverY = sy + Math.sin(this.elapsed * 3.4 + interp.phase) * 0.14;
 
-      const hoverY = sy + Math.sin(this.elapsed * 3.4 + vis.phase) * 0.14;
-      vis.group.position.set(sx, hoverY, sz);
+      let yaw = 0;
+      let bodyRotX = 0;
+      let bodyRotZ = 0;
+      let groupScale = 1;
+      let eyeHex = outlineHex;
 
-      const dx = this.lastPlayerX - sx;
-      const dz = this.lastPlayerZ - sz;
-      if (dx * dx + dz * dz > 0.001) {
-        vis.group.rotation.y = Math.atan2(dx, dz);
-      }
+      if (s.state === "drain") {
+        let targetLantern: LanternState | null = null;
+        let bestDistSq = Infinity;
+        for (let j = 0; j < lanternStates.length; j++) {
+          const l = lanternStates[j];
+          if (!l.lit) continue;
+          const ldx = l.pos[0] - sx;
+          const ldz = l.pos[2] - sz;
+          const dSq = ldx * ldx + ldz * ldz;
+          const isBetter =
+            dSq < bestDistSq ||
+            (targetLantern &&
+              targetLantern.fuel >= TUNING.low_fuel_threshold &&
+              l.fuel < TUNING.low_fuel_threshold &&
+              dSq < 16);
+          if (isBetter) {
+            bestDistSq = dSq;
+            targetLantern = l;
+          }
+        }
+        bodyRotX = 0.22;
+        if (targetLantern) {
+          const ldx = targetLantern.pos[0] - sx;
+          const ldz = targetLantern.pos[2] - sz;
+          if (ldx * ldx + ldz * ldz > 0.001) {
+            yaw = Math.atan2(ldx, ldz);
+          }
 
-      // Reset default transform before applying state visuals
-      vis.group.scale.setScalar(1);
-      vis.bodyMesh.rotation.set(0, 0, 0);
-      vis.stunHalo.visible = false;
-      vis.spawnRing.visible = false;
-
-      if (s.state === "spawning") {
-        const pulseScale = 0.45 + 0.45 * Math.abs(Math.sin(this.elapsed * 8 + vis.phase));
-        vis.group.scale.set(pulseScale, pulseScale, pulseScale);
-        vis.bodyMat.color.setHex(PALETTE.shadeBody);
-        vis.bodyMat.emissive.setHex(PALETTE.shadeOutline);
-        vis.bodyMat.emissiveIntensity = 0.9;
-        vis.eyeLeftMat.color.setHex(PALETTE.shadeOutline);
-        vis.eyeRightMat.color.setHex(PALETTE.shadeOutline);
-        vis.spawnRing.visible = true;
-        vis.spawnRing.scale.setScalar(0.8 + 0.5 * Math.sin(this.elapsed * 10));
-      } else if (s.state === "stunned") {
-        vis.bodyMat.color.setHex(PALETTE.shadeStunned);
-        vis.bodyMat.emissive.setHex(PALETTE.shadeStunned);
-        vis.bodyMat.emissiveIntensity = 0.42;
-        vis.eyeLeftMat.color.setHex(PALETTE.gold);
-        vis.eyeRightMat.color.setHex(PALETTE.gold);
-        vis.stunHalo.visible = true;
-        vis.stunHalo.rotation.z = this.elapsed * 4.2;
-        vis.bodyMesh.rotation.z = Math.sin(this.elapsed * 18) * 0.16;
-      } else if (s.state === "recoil") {
-        vis.bodyMat.color.setHex(PALETTE.shadeBody);
-        vis.bodyMat.emissive.setHex(PALETTE.dangerUi);
-        vis.bodyMat.emissiveIntensity = 0.55;
-        vis.eyeLeftMat.color.setHex(PALETTE.dangerUi);
-        vis.eyeRightMat.color.setHex(PALETTE.dangerUi);
-        vis.bodyMesh.rotation.x = -0.35;
-      } else if (s.state === "chase") {
-        vis.bodyMat.color.setHex(PALETTE.shadeBody);
-        vis.bodyMat.emissive.setHex(PALETTE.shadeOutline);
-        vis.bodyMat.emissiveIntensity = 0.48;
-        vis.eyeLeftMat.color.setHex(PALETTE.shadeOutline);
-        vis.eyeRightMat.color.setHex(PALETTE.shadeOutline);
-        vis.bodyMesh.rotation.x = 0.18;
+          // Skip drain tendril/beam when far from camera
+          const cdx = sx - camX;
+          const cdz = sz - camZ;
+          if (
+            drainBeamCount < MAX_SHADE_INSTANCES &&
+            cdx * cdx + cdz * cdz <= DRAIN_BEAM_MAX_DIST_SQ
+          ) {
+            this.scratchVec.set(sx, hoverY + 0.2, sz);
+            this.scratchVec2.set(
+              targetLantern.pos[0],
+              targetLantern.pos[1] + 3.65,
+              targetLantern.pos[2]
+            );
+            const dist = this.scratchVec.distanceTo(this.scratchVec2);
+            if (dist > 0.05) {
+              this.scratchPos.copy(this.scratchVec).lerp(this.scratchVec2, 0.5);
+              this.scratchVec2.sub(this.scratchVec).normalize();
+              this.scratchQuat.setFromUnitVectors(UP_VEC, this.scratchVec2);
+              const pulseW = 0.85 + 0.35 * Math.sin(this.elapsed * 12 + interp.phase);
+              this.scratchScale.set(pulseW, dist, pulseW);
+              this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+              this.shadeDrainBeamInst.setMatrixAt(drainBeamCount++, this.scratchMat);
+            }
+          }
+        }
       } else {
-        // wander
-        vis.bodyMat.color.setHex(PALETTE.shadeBody);
-        vis.bodyMat.emissive.setHex(PALETTE.shadeOutline);
-        vis.bodyMat.emissiveIntensity = 0.2;
-        vis.eyeLeftMat.color.setHex(PALETTE.shadeOutline);
-        vis.eyeRightMat.color.setHex(PALETTE.shadeOutline);
+        const dx = this.lastPlayerX - sx;
+        const dz = this.lastPlayerZ - sz;
+        if (dx * dx + dz * dz > 0.001) {
+          yaw = Math.atan2(dx, dz);
+        }
+
+        if (s.state === "spawning") {
+          groupScale = 0.45 + 0.45 * Math.abs(Math.sin(this.elapsed * 8 + interp.phase));
+          if (spawnRingCount < MAX_SHADE_INSTANCES) {
+            const rScale = groupScale * (0.8 + 0.5 * Math.sin(this.elapsed * 10));
+            this.scratchPos.set(sx, hoverY - 0.92 * groupScale, sz);
+            this.scratchQuat.identity();
+            this.scratchScale.set(rScale, rScale, rScale);
+            this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+            this.shadeSpawnRingInst.setMatrixAt(spawnRingCount++, this.scratchMat);
+          }
+        } else if (s.state === "stunned") {
+          eyeHex = PALETTE.gold;
+          bodyRotZ = Math.sin(this.elapsed * 18) * 0.16;
+        } else if (s.state === "recoil") {
+          eyeHex = dangerHex;
+          bodyRotX = -0.35;
+        } else if (s.state === "chase") {
+          bodyRotX = 0.18;
+        }
+      }
+
+      const cosY = Math.cos(yaw);
+      const sinY = Math.sin(yaw);
+
+      // Body & Tail
+      this.scratchPos.set(sx, hoverY, sz);
+      this.scratchEuler.set(bodyRotX, yaw, bodyRotZ, "YXZ");
+      this.scratchQuat.setFromEuler(this.scratchEuler);
+      this.scratchScale.set(groupScale, 1.18 * groupScale, groupScale);
+      this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+
+      if (s.state === "stunned") {
+        if (stunCount < MAX_SHADE_INSTANCES) {
+          this.shadeStunBodyInst.setMatrixAt(stunCount, this.scratchMat);
+
+          this.scratchPos.set(sx, hoverY - 0.65 * groupScale, sz);
+          this.scratchEuler.set(0, yaw, 0);
+          this.scratchQuat.setFromEuler(this.scratchEuler);
+          this.scratchScale.set(groupScale, groupScale, groupScale);
+          this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+          this.shadeStunTailInst.setMatrixAt(stunCount, this.scratchMat);
+
+          this.scratchPos.set(sx, hoverY + 1.05 * groupScale, sz);
+          this.scratchEuler.set(0, 0, this.elapsed * 4.2);
+          this.scratchQuat.setFromEuler(this.scratchEuler);
+          this.scratchScale.set(groupScale, groupScale, groupScale);
+          this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+          this.shadeStunHaloInst.setMatrixAt(stunCount, this.scratchMat);
+          stunCount++;
+        }
+      } else {
+        if (normalCount < MAX_SHADE_INSTANCES) {
+          this.shadeBodyInst.setMatrixAt(normalCount, this.scratchMat);
+
+          this.scratchPos.set(sx, hoverY - 0.65 * groupScale, sz);
+          this.scratchEuler.set(0, yaw, 0);
+          this.scratchQuat.setFromEuler(this.scratchEuler);
+          this.scratchScale.set(groupScale, groupScale, groupScale);
+          this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+          this.shadeTailInst.setMatrixAt(normalCount, this.scratchMat);
+          normalCount++;
+        }
+      }
+
+      // Two Eyes (rotated around Y by yaw)
+      if (eyeCount + 1 < MAX_SHADE_INSTANCES * 2) {
+        this.scratchColor.setHex(eyeHex);
+        this.scratchQuat.identity();
+        this.scratchScale.set(groupScale, groupScale, groupScale);
+
+        const lx = -0.22 * groupScale;
+        const lz = 0.56 * groupScale;
+        this.scratchPos.set(sx + lx * cosY + lz * sinY, hoverY + 0.16 * groupScale, sz - lx * sinY + lz * cosY);
+        this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+        this.shadeEyeInst.setMatrixAt(eyeCount, this.scratchMat);
+        this.shadeEyeInst.setColorAt(eyeCount, this.scratchColor);
+        eyeCount++;
+
+        const rx = 0.22 * groupScale;
+        this.scratchPos.set(sx + rx * cosY + lz * sinY, hoverY + 0.16 * groupScale, sz - rx * sinY + lz * cosY);
+        this.scratchMat.compose(this.scratchPos, this.scratchQuat, this.scratchScale);
+        this.shadeEyeInst.setMatrixAt(eyeCount, this.scratchMat);
+        this.shadeEyeInst.setColorAt(eyeCount, this.scratchColor);
+        eyeCount++;
       }
     }
 
-    for (const [id, vis] of this.shades.entries()) {
+    for (const id of this.shadeInterps.keys()) {
       if (!this.seenIds.has(id)) {
-        this.scene.remove(vis.group);
-        vis.bodyMat.dispose();
-        vis.eyeLeftMat.dispose();
-        vis.eyeRightMat.dispose();
-        this.shades.delete(id);
+        this.shadeInterps.delete(id);
       }
+    }
+
+    this.shadeBodyInst.count = normalCount;
+    this.shadeTailInst.count = normalCount;
+    this.shadeStunBodyInst.count = stunCount;
+    this.shadeStunTailInst.count = stunCount;
+    this.shadeStunHaloInst.count = stunCount;
+    this.shadeEyeInst.count = eyeCount;
+    this.shadeSpawnRingInst.count = spawnRingCount;
+    this.shadeDrainBeamInst.count = drainBeamCount;
+
+    if (normalCount > 0) {
+      this.shadeBodyInst.instanceMatrix.needsUpdate = true;
+      this.shadeTailInst.instanceMatrix.needsUpdate = true;
+    }
+    if (stunCount > 0) {
+      this.shadeStunBodyInst.instanceMatrix.needsUpdate = true;
+      this.shadeStunTailInst.instanceMatrix.needsUpdate = true;
+      this.shadeStunHaloInst.instanceMatrix.needsUpdate = true;
+    }
+    if (eyeCount > 0) {
+      this.shadeEyeInst.instanceMatrix.needsUpdate = true;
+      if (this.shadeEyeInst.instanceColor) {
+        this.shadeEyeInst.instanceColor.needsUpdate = true;
+      }
+    }
+    if (spawnRingCount > 0) {
+      this.shadeSpawnRingInst.instanceMatrix.needsUpdate = true;
+    }
+    if (drainBeamCount > 0) {
+      this.shadeDrainBeamInst.instanceMatrix.needsUpdate = true;
     }
   }
 
@@ -1757,6 +2252,7 @@ export class SceneManager {
   }
 
   private updatePulseWaves(dtSec: number): void {
+    const maxOpacity = this.reducedMotion ? 0.32 : 0.85;
     for (let i = 0; i < this.pulseWaves.length; i++) {
       const w = this.pulseWaves[i];
       if (!w.active) continue;
@@ -1767,9 +2263,10 @@ export class SceneManager {
         w.mesh.visible = false;
         continue;
       }
-      const radius = 0.5 + (PULSE_RADIUS - 0.5) * (1 - Math.pow(1 - t, 2));
+      const ease = this.reducedMotion ? t : 1 - Math.pow(1 - t, 2);
+      const radius = 0.5 + (PULSE_RADIUS - 0.5) * ease;
       w.mesh.scale.setScalar(radius);
-      w.mat.opacity = (1 - t) * 0.85;
+      w.mat.opacity = (1 - t) * maxOpacity;
     }
   }
 
@@ -1811,6 +2308,7 @@ export class SceneManager {
   }
 
   private readonly handleResize = (): void => {
+    if (this.benchMode) return;
     const w = this.container.clientWidth || window.innerWidth;
     const h = Math.max(1, this.container.clientHeight || window.innerHeight);
     this.camera.aspect = w / h;

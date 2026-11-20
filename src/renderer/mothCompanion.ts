@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { SimEvent, SimSnapshot } from "../sim";
+import { TUNING, type SimEvent, type SimSnapshot } from "../sim";
 import { PALETTE } from "./palette";
 
 interface SparkleParticle {
@@ -9,7 +9,6 @@ interface SparkleParticle {
   maxLife: number;
 }
 
-const CARRY_CAPACITY = 10;
 const MAX_SPARKLES = 24;
 
 /**
@@ -104,7 +103,12 @@ export class MothCompanion {
 
   public onEvents(events: readonly SimEvent[]): void {
     for (const ev of events) {
-      if (ev.name === "lantern_lit" || ev.name === "pulse" || ev.name === "charm_picked") {
+      if (
+        ev.name === "lantern_lit" ||
+        ev.name === "refuel" ||
+        ev.name === "pulse" ||
+        ev.name === "charm_picked"
+      ) {
         this.burstRemaining = Math.max(this.burstRemaining, 0.9);
         this.emitSparkles(8);
       }
@@ -115,12 +119,12 @@ export class MothCompanion {
     this.elapsed += dtSec;
     const [px, py, pz] = snapshot.player.pos;
 
-    // Guide toward nearest unlit lantern when carrying a full load (10 motes)
+    // Guide toward nearest lantern that can receive when carrying a full load
     let guideLantern: [number, number, number] | null = null;
-    if (snapshot.player.carried >= CARRY_CAPACITY) {
+    if (snapshot.player.carried >= snapshot.player.capacity) {
       let bestDistSq = Infinity;
       for (const l of snapshot.lanterns) {
-        if (l.lit) continue;
+        if (l.lit && l.fuel >= TUNING.fuel_max) continue;
         const dx = l.pos[0] - px;
         const dz = l.pos[2] - pz;
         const dSq = dx * dx + dz * dz;

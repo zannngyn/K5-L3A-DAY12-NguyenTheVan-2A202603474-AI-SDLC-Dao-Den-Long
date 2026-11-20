@@ -1,0 +1,12 @@
+{
+  "player": { "pos": [0, 0, 0], "carried": 1, "flames": 3 },
+  "random_motes": false,
+  "random_shades": false,
+  "lanterns": [
+    { "id": "L1", "pos": [0, 0, 1.5], "lit": true, "fuel": 25 }
+  ],
+  "shades": [
+    { "id": "S1", "pos": [0, 1, 2.5], "state": "drain", "target_lantern_id": "L1" }
+  ],
+  "time_left_s": 100
+}

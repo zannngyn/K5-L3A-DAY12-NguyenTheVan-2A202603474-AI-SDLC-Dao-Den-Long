@@ -1,6 +1,6 @@
 /**
- * Standard Ticket-02 ("Ba hòn đảo") color palette tokens.
- * All hex values match .swarm/specs/ticket-02.md & design-phase2.md Section 4.8.
+ * Color palette tokens for Đảo Đèn Lồng (Contract v1.2 / Ticket-03).
+ * Supports standard and color-blind ("Bảng màu dễ phân biệt") modes.
  */
 export const PALETTE_HEX = {
   nightSky: "#0E1430",
@@ -16,6 +16,7 @@ export const PALETTE_HEX = {
   moteHalo: "#FFE58A",
   shadeBody: "#120A1A",
   shadeOutline: "#7A3CFF",
+  shadeOutlineColorBlind: "#00B3FF",
   shadeStunned: "#3A3450",
   mayShirt: "#E8E2D0",
   mayScarf: "#C8102E",
@@ -23,6 +24,7 @@ export const PALETTE_HEX = {
   gold: "#F2C14E",
   drifter: "#8FA3B8",
   dangerUi: "#FF5A5F",
+  dangerUiColorBlind: "#FFFFFF",
   uiText: "#F5F1E6",
 } as const;
 
@@ -54,3 +56,28 @@ export const PALETTE = {
   stoneRim: 0x5b5f6e,
   litGroundWarmth: 0x5c4328,
 } as const;
+
+export interface ActivePalette {
+  shadeOutline: number;
+  dangerUi: number;
+  shadeOutlineHex: string;
+  dangerUiHex: string;
+}
+
+export const STANDARD_ACTIVE_PALETTE: ActivePalette = {
+  shadeOutline: PALETTE.shadeOutline,
+  dangerUi: PALETTE.dangerUi,
+  shadeOutlineHex: PALETTE_HEX.shadeOutline,
+  dangerUiHex: PALETTE_HEX.dangerUi,
+};
+
+export const COLORBLIND_ACTIVE_PALETTE: ActivePalette = {
+  shadeOutline: 0x00b3ff,
+  dangerUi: 0xffffff,
+  shadeOutlineHex: PALETTE_HEX.shadeOutlineColorBlind,
+  dangerUiHex: PALETTE_HEX.dangerUiColorBlind,
+};
+
+export function getActivePalette(colorBlind: boolean): ActivePalette {
+  return colorBlind ? COLORBLIND_ACTIVE_PALETTE : STANDARD_ACTIVE_PALETTE;
+}

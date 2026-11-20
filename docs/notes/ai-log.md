@@ -34,6 +34,17 @@
 
 - **Token / cost estimate (Phase 3):** TBD by user
 
+## Phase 4 — Ticket-04 ("Bình minh: phát hành v1.0.0") & Contract v1.3
+
+| Role / Worker | Scope & Output | Prompts Summary |
+|---|---|---|
+| Coordinator | Ingested `ticket-04.md`, authored `.swarm/specs/phase4-architecture.md` (zero-dep launcher, bench/soak/leaderboard APIs), split Phase 4 implementation and docs in parallel | Ownership-scoped briefs referencing `.swarm/specs/ticket-04.md` and `phase4-architecture.md` |
+| Dev Worker 1 (Sim, Headless, Soak & Launcher) | Implementing `makeBenchScenario` + `SimOptions.bench`, `src/headless/soak.ts`, `scripts/play.mjs` (launcher, `/api/leaderboard`, `/api/bench/*`, `--export-leaderboard`), `scripts/package-release.sh`, Contract v1.3, and tests | Scoped to `src/sim/**`, `src/headless/**`, `game.contract.json`, `tests/**`, `scripts/**` |
+| Dev Worker 2 (Client) | Implementing `?bench=1` orbit-camera benchmark mode (with InstancedMesh & creative extras OFF), Leaderboard UI, Key Rebinding, visual cues/captions, Reduced Motion, and `18 px` / `1.25x` Large Text | Scoped to client files reading `Sim` exports |
+| Docs / Harness Worker | Authored `docs/notes/spec-phase4.md`, `docs/notes/retro.md`, updated `README.md`, `CHANGELOG.md`, `CREDITS.md`, `AGENTS.md`, `.claude/skills/headless-proof/SKILL.md`, and `docs/notes/ai-log.md` | Scoped strictly to docs and harness files; no code edits |
+
+- **Token / cost estimate (Phase 4):** TBD by user
+
 ## AI Mistakes Found & How Detected
 
 | # | Incident | How Detected | Resolution / Harness Change |

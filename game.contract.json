@@ -1,9 +1,11 @@
 {
-  "contract_version": "1.2",
+  "contract_version": "1.3",
   "team": "2A202603474-nguyen-the-van",
-  "build_cmd": "npm install",
-  "run_cmd": "npm run dev",
+  "build_cmd": "npm install && npm run build",
+  "run_cmd": "node scripts/play.mjs",
   "headless_cmd": "npx tsx src/headless/cli.ts",
+  "bench_cmd": "node scripts/play.mjs --bench",
+  "soak_cmd": "npx tsx src/headless/soak.ts",
   "tuning": {
     "player_speed": 6.0,
     "carry_capacity": 10,
