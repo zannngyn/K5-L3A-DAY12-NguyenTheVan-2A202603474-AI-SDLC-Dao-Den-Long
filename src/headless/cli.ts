@@ -64,6 +64,7 @@ function serializeSnapshot(snap: SimSnapshot): SimSnapshot {
       grounded: snap.player.grounded,
       flames: snap.player.flames,
       carried: snap.player.carried,
+      capacity: snap.player.capacity,
       invuln: snap.player.invuln,
       dash_cd_s: round3(snap.player.dash_cd_s),
       pulse_cd_s: round3(snap.player.pulse_cd_s),
@@ -74,6 +75,9 @@ function serializeSnapshot(snap: SimSnapshot): SimSnapshot {
       pos: roundVec3(l.pos),
       lit: l.lit,
       deposited: l.deposited,
+      fuel: round1(l.fuel),
+      ever_lit: l.ever_lit,
+      relit_count: l.relit_count,
     })),
     shades: snap.shades.map((s) => ({
       id: s.id,
@@ -221,6 +225,12 @@ function loadScenario(filePath: string): ScenarioConfig {
     if (parsed.player.charm_ticks !== undefined && !isNonNegNumber(parsed.player.charm_ticks)) {
       throw new ValidationError("scenario.player.charm_ticks must be a non-negative number");
     }
+    if (
+      parsed.player.successful_lights !== undefined &&
+      !isNonNegNumber(parsed.player.successful_lights)
+    ) {
+      throw new ValidationError("scenario.player.successful_lights must be a non-negative number");
+    }
   }
 
   if (parsed.random_motes !== undefined && typeof parsed.random_motes !== "boolean") {
@@ -274,11 +284,17 @@ function loadScenario(filePath: string): ScenarioConfig {
       }
       if (s.state !== undefined && (typeof s.state !== "string" || !VALID_SHADE_STATES.has(s.state))) {
         throw new ValidationError(
-          `scenario.shades[${i}].state must be one of spawning, wander, chase, recoil, stunned`,
+          `scenario.shades[${i}].state must be one of spawning, wander, chase, recoil, stunned, drain`,
         );
       }
       if (s.state_ticks_left !== undefined && !isNonNegNumber(s.state_ticks_left)) {
         throw new ValidationError(`scenario.shades[${i}].state_ticks_left must be a non-negative number`);
+      }
+      if (
+        s.target_lantern_id !== undefined &&
+        (typeof s.target_lantern_id !== "string" || s.target_lantern_id.length === 0)
+      ) {
+        throw new ValidationError(`scenario.shades[${i}].target_lantern_id must be a non-empty string`);
       }
     }
   }
@@ -300,6 +316,12 @@ function loadScenario(filePath: string): ScenarioConfig {
       }
       if (l.lit !== undefined && typeof l.lit !== "boolean") {
         throw new ValidationError(`scenario.lanterns[${i}].lit must be a boolean`);
+      }
+      if (l.fuel !== undefined && !isNonNegNumber(l.fuel)) {
+        throw new ValidationError(`scenario.lanterns[${i}].fuel must be a non-negative number`);
+      }
+      if (l.ever_lit !== undefined && typeof l.ever_lit !== "boolean") {
+        throw new ValidationError(`scenario.lanterns[${i}].ever_lit must be a boolean`);
       }
     }
   }
