@@ -1,0 +1,11 @@
+{
+  "player": { "pos": [0, 0, -12], "carried": 0, "flames": 3 },
+  "random_motes": false,
+  "random_shades": false,
+  "random_drifters": false,
+  "wind_enabled": true,
+  "motes": [],
+  "shades": [],
+  "drifters": [],
+  "time_left_s": 360
+}

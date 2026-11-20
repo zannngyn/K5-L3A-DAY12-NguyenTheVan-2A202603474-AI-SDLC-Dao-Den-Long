@@ -1,0 +1,10 @@
+{
+  "player": { "pos": [0, 0, 0], "carried": 6, "flames": 3 },
+  "random_motes": false,
+  "random_shades": false,
+  "random_drifters": false,
+  "motes": [],
+  "shades": [],
+  "drifters": [{ "id": "D1", "pos": [0, 1.2, 1.0], "state": "idle" }],
+  "time_left_s": 330
+}
