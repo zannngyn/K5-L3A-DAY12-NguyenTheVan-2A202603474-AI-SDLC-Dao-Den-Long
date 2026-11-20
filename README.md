@@ -1,6 +1,6 @@
 # Đảo Đèn Lồng (Lantern Island) — v1.0.0
 
-*(video demo < 5 phút: sẽ bổ sung tại `docs/demo/demo.mp4` hoặc Release `v1.0.0`)*
+*(video demo < 5 phút: [xem tại Release v1.0.0](https://github.com/zannngyn/K5-L3A-DAY12-NguyenTheVan-2A202603474-AI-SDLC-Dao-Den-Long/releases/download/v1.0.0/demo.mp4))*
 
 Game 3D góc nhìn thứ ba xây dựng bằng **Three.js + TypeScript** (mô phỏng tất định 60 ticks/s, tuân thủ **Test Contract v1.3**). Người chơi vào vai **Mây**, thu thập đom đóm, thắp và tiếp dầu cho các Đèn Lồng Lớn, né **Bóng Mực** và **Gió Lạc** để giữ đảo sáng tới bình minh qua 3 Đêm (**Đảo Bến**, **Đảo Cầu**, **Đảo Chuông**).
 
